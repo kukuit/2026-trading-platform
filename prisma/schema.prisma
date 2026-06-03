@@ -3,107 +3,99 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
-model WorkSession {
-  id              String            @id @default(cuid())
-  date            String
-  startAt         DateTime
-  endAt           DateTime?
-  durationSeconds Int?
-  device          String?
-  notes           String?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  status          WorkSessionStatus @default(active)
+model Coin {
+  id        Int      @id @default(autoincrement())
+  symbol    String   @unique
+  name      String
+  createdAt DateTime
+  updatedAt DateTime
 
-  @@index([date])
-  @@index([status])
+  marketData CoinMarketData[]
+  holdings   Holding[]
+  trades     Trade[]
 }
 
-model HealthLog {
-  id            String   @id @default(cuid())
-  date          String
-  weekday       String?
-  weight        Decimal? @db.Decimal(5, 2)
-  morning       String?
-  gym           String?
-  afternoon     String?
-  noEatAfter    String?
-  calories      Int?
-  goutTreatment Int?
-  status        Status   @default(active)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+model CoinMarketData {
+  id           Int      @id @default(autoincrement())
+  coinId       Int
+  snapshotDate DateTime @db.Date
+  priceUsd     Decimal  @db.Decimal(18, 8)
+  marketCap    Decimal  @db.Decimal(24, 2)
+  volume24h    Decimal  @db.Decimal(24, 2)
+  createdAt    DateTime
 
-  @@index([date])
-  @@index([status])
+  coin Coin @relation(fields: [coinId], references: [id])
+
+  @@unique([coinId, snapshotDate])
+  @@index([snapshotDate])
 }
 
-model Todo {
-  id          String       @id @default(cuid())
-  title       String
-  description String?
-  labels      String[]
-  category    TodoCategory @default(Other)
-  priority    TodoPriority @default(normal)
-  state       TodoState    @default(todo)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  dueAt       DateTime?
-  startedAt   DateTime?
-  completedAt DateTime?
-  canceledAt  DateTime?
-  estimateMin Int?
-  spentMin    Int?
-  waitingOn   String?
-  parentId    String?
-  sortOrder   Int?
-  status      Status       @default(active)
-  parent      Todo?        @relation("TodoSubtasks", fields: [parentId], references: [id])
-  subtasks    Todo[]       @relation("TodoSubtasks")
+model User {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  startingBalance Decimal  @db.Decimal(18, 2)
+  currentBalance  Decimal  @db.Decimal(18, 2)
+  createdAt       DateTime
 
-  @@index([state, priority, dueAt])
-  @@index([category])
-  @@index([parentId, sortOrder])
-  @@index([status])
+  holdings    Holding[]
+  trades      Trade[]
+  dailyAssets UserDailyAsset[]
 }
 
-enum Status {
-  active
-  disabled
+model Holding {
+  id        String   @id @default(cuid())
+  userId    String
+  coinId    Int
+  quantity  Decimal  @db.Decimal(24, 8)
+  avgPrice  Decimal  @db.Decimal(18, 8)
+  createdAt DateTime
+  updatedAt DateTime
+
+  user User @relation(fields: [userId], references: [id])
+  coin Coin @relation(fields: [coinId], references: [id])
+
+  @@unique([userId, coinId])
+  @@index([coinId])
 }
 
-enum WorkSessionStatus {
-  active
-  disabled
+model Trade {
+  id          String    @id @default(cuid())
+  userId      String
+  coinId      Int
+  type        TradeType
+  quantity    Decimal   @db.Decimal(24, 8)
+  priceUsd    Decimal   @db.Decimal(18, 8)
+  totalAmount Decimal   @db.Decimal(18, 2)
+  createdAt   DateTime
+
+  user User @relation(fields: [userId], references: [id])
+  coin Coin @relation(fields: [coinId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([coinId])
 }
 
-enum TodoCategory {
-  Ainka
-  Kuku
-  Freelancer
-  Personal
-  Learning
-  Other
+model UserDailyAsset {
+  id           String   @id @default(cuid())
+  userId       String
+  snapshotDate DateTime @db.Date
+  cashBalance  Decimal  @db.Decimal(18, 2)
+  assetValue   Decimal  @db.Decimal(18, 2)
+  totalValue   Decimal  @db.Decimal(18, 2)
+  createdAt    DateTime
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, snapshotDate])
+  @@index([snapshotDate])
 }
 
-enum TodoPriority {
-  low
-  normal
-  high
-  urgent
-  critical
-}
-
-enum TodoState {
-  todo
-  in_progress
-  waiting
-  blocked
-  done
-  canceled
-  archived
+enum TradeType {
+  BUY
+  SELL
 }
