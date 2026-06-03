@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model WorkSession {
+  id              String            @id @default(cuid())
+  date            String
+  startAt         DateTime
+  endAt           DateTime?
+  durationSeconds Int?
+  device          String?
+  notes           String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  status          WorkSessionStatus @default(active)
+
+  @@index([date])
+  @@index([status])
+}
+
+model HealthLog {
+  id            String   @id @default(cuid())
+  date          String
+  weekday       String?
+  weight        Decimal? @db.Decimal(5, 2)
+  morning       String?
+  gym           String?
+  afternoon     String?
+  noEatAfter    String?
+  calories      Int?
+  goutTreatment Int?
+  status        Status   @default(active)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([date])
+  @@index([status])
+}
+
+model Todo {
+  id          String       @id @default(cuid())
+  title       String
+  description String?
+  labels      String[]
+  category    TodoCategory @default(Other)
+  priority    TodoPriority @default(normal)
+  state       TodoState    @default(todo)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  dueAt       DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  canceledAt  DateTime?
+  estimateMin Int?
+  spentMin    Int?
+  waitingOn   String?
+  parentId    String?
+  sortOrder   Int?
+  status      Status       @default(active)
+  parent      Todo?        @relation("TodoSubtasks", fields: [parentId], references: [id])
+  subtasks    Todo[]       @relation("TodoSubtasks")
+
+  @@index([state, priority, dueAt])
+  @@index([category])
+  @@index([parentId, sortOrder])
+  @@index([status])
+}
+
+enum Status {
+  active
+  disabled
+}
+
+enum WorkSessionStatus {
+  active
+  disabled
+}
+
+enum TodoCategory {
+  Ainka
+  Kuku
+  Freelancer
+  Personal
+  Learning
+  Other
+}
+
+enum TodoPriority {
+  low
+  normal
+  high
+  urgent
+  critical
+}
+
+enum TodoState {
+  todo
+  in_progress
+  waiting
+  blocked
+  done
+  canceled
+  archived
+}
