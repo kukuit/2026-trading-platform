@@ -8,11 +8,14 @@ datasource db {
 }
 
 model Coin {
-  id        Int      @id @default(autoincrement())
-  symbol    String   @unique
-  name      String
-  createdAt DateTime
-  updatedAt DateTime
+  id          Int      @id @default(autoincrement())
+  symbol      String   @unique
+  name        String
+  binancePair String?  @unique
+  coingeckoId String?  @unique
+  marketCap   Decimal  @default(0) @db.Decimal(24, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   marketData CoinMarketData[]
   holdings   Holding[]
