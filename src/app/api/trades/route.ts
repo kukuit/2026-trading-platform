@@ -9,7 +9,6 @@ const tradeSchema = z.object({
   userId: z.string().min(1),
   coinId: z.coerce.number().int().positive(),
   type: z.nativeEnum(TradeType),
-  amountUsd: z.coerce.number().positive().optional(),
   quantity: z.coerce.number().positive().optional(),
 });
 
@@ -33,11 +32,12 @@ export async function POST(request: Request) {
     const cash = decimalToNumber(user.currentBalance);
 
     if (payload.type === "BUY") {
-      const amountUsd = payload.amountUsd ?? 0;
-      if (amountUsd <= 0) throw new Error("BUY_AMOUNT_REQUIRED");
+      const quantity = payload.quantity ?? 0;
+      if (quantity <= 0) throw new Error("BUY_QUANTITY_REQUIRED");
+
+      const amountUsd = quantity * priceUsd;
       if (cash < amountUsd) throw new Error("INSUFFICIENT_CASH");
 
-      const quantity = amountUsd / priceUsd;
       const existing = await tx.holding.findUnique({
         where: { userId_coinId: { userId: payload.userId, coinId: payload.coinId } },
       });

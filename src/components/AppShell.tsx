@@ -9,7 +9,6 @@ import {
   Loader2,
   Plus,
   RefreshCw,
-  Save,
   BadgeDollarSign,
   X,
   UserPlus,
@@ -26,8 +25,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { money, quantity } from '@/lib/serializers'
-import { appTodayInput } from '@/config/timezone'
+import { money, preciseMoney, quantity } from '@/lib/serializers'
 
 type User = {
   id: string
@@ -143,6 +141,7 @@ export default function AppShell() {
   const [sellHolding, setSellHolding] = useState<PortfolioRow | null>(null)
   const [tradeMode, setTradeMode] = useState<'BUY' | 'SELL'>('BUY')
   const [tradeQuantity, setTradeQuantity] = useState('')
+  const [tradeAmountUsd, setTradeAmountUsd] = useState('')
   const [isCreateUserOpen, setIsCreateUserOpen] = useState(false)
   const [toast, setToast] = useState('')
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -245,9 +244,6 @@ export default function AppShell() {
     mutationFn: async () => {
       if (tradeMode === 'BUY' && !selectedTradeCoin) throw new Error('No coin selected')
       if (tradeMode === 'SELL' && !sellHolding) throw new Error('No holding selected')
-      const buyAmountUsd = selectedTradeCoin
-        ? Number(tradeQuantity) * selectedTradeCoin.priceUsd
-        : undefined
       const response = await fetch('/api/trades', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -255,8 +251,7 @@ export default function AppShell() {
           userId: activeUserId,
           coinId: tradeMode === 'BUY' ? selectedTradeCoin?.id : sellHolding?.coinId,
           type: tradeMode,
-          amountUsd: tradeMode === 'BUY' ? buyAmountUsd : undefined,
-          quantity: tradeMode === 'SELL' ? Number(tradeQuantity) : undefined,
+          quantity: Number(tradeQuantity),
         }),
       })
       if (!response.ok) throw new Error(await response.text())
@@ -265,25 +260,12 @@ export default function AppShell() {
     onSuccess: () => {
       const coinSymbol = tradeMode === 'BUY' ? selectedTradeCoin?.symbol : sellHolding?.symbol
       setTradeQuantity('')
+      setTradeAmountUsd('')
       setTradeCoinId(null)
       setSellHolding(null)
       showToast(`${tradeMode} ${coinSymbol ?? 'coin'} thành công`)
       refreshUserData()
     },
-  })
-
-  const snapshotMutation = useMutation({
-    mutationFn: async () => {
-      const today = appTodayInput()
-      const response = await fetch(`/api/users/${activeUserId}/snapshots`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ snapshotDate: today }),
-      })
-      if (!response.ok) throw new Error(await response.text())
-      return response.json()
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['performance', activeUserId] }),
   })
 
   const dashboard = dashboardQuery.data
@@ -332,11 +314,39 @@ export default function AppShell() {
     tradeMutation.mutate()
   }
 
+  const formatTradeInput = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return ''
+    return value.toFixed(8).replace(/\.?0+$/, '')
+  }
+
+  const handleBuyQuantityChange = (value: string) => {
+    setTradeQuantity(value)
+    const numericValue = Number(value)
+    if (!selectedTradeCoin || !Number.isFinite(numericValue) || numericValue <= 0) {
+      setTradeAmountUsd('')
+      return
+    }
+
+    setTradeAmountUsd(formatTradeInput(numericValue * selectedTradeCoin.priceUsd))
+  }
+
+  const handleBuyAmountUsdChange = (value: string) => {
+    setTradeAmountUsd(value)
+    const numericValue = Number(value)
+    if (!selectedTradeCoin || !Number.isFinite(numericValue) || numericValue <= 0) {
+      setTradeQuantity('')
+      return
+    }
+
+    setTradeQuantity(formatTradeInput(numericValue / selectedTradeCoin.priceUsd))
+  }
+
   const openTradeModal = (coinId: number) => {
     setTradeMode('BUY')
     setTradeCoinId(coinId)
     setSellHolding(null)
     setTradeQuantity('')
+    setTradeAmountUsd('')
     tradeMutation.reset()
   }
 
@@ -345,6 +355,7 @@ export default function AppShell() {
     setSellHolding(holding)
     setTradeCoinId(null)
     setTradeQuantity('')
+    setTradeAmountUsd('')
     tradeMutation.reset()
   }
 
@@ -448,7 +459,9 @@ export default function AppShell() {
           {activeTab === 'performance' && (
             <PerformancePanel
               performance={performance}
-              onSnapshot={() => snapshotMutation.mutate()}
+              onRefresh={() =>
+                queryClient.invalidateQueries({ queryKey: ['performance', activeUserId] })
+              }
             />
           )}
 
@@ -477,6 +490,7 @@ export default function AppShell() {
           coin={selectedTradeCoin}
           cashBalance={cashBalance}
           quantityValue={tradeQuantity}
+          amountUsdValue={tradeAmountUsd}
           estimatedCost={estimatedCost}
           remainingCash={remainingCash}
           isInvalid={tradeQuantityInvalid}
@@ -484,10 +498,12 @@ export default function AppShell() {
           error={
             tradeMutation.error ? 'Không thể mua coin này. Kiểm tra số dư hoặc dữ liệu giá.' : ''
           }
-          onQuantityChange={setTradeQuantity}
+          onQuantityChange={handleBuyQuantityChange}
+          onAmountUsdChange={handleBuyAmountUsdChange}
           onClose={() => {
             setTradeCoinId(null)
             setTradeQuantity('')
+            setTradeAmountUsd('')
             tradeMutation.reset()
           }}
           onSubmit={handleTrade}
@@ -615,24 +631,28 @@ function TradeModal({
   coin,
   cashBalance,
   quantityValue,
+  amountUsdValue,
   estimatedCost,
   remainingCash,
   isInvalid,
   isPending,
   error,
   onQuantityChange,
+  onAmountUsdChange,
   onClose,
   onSubmit,
 }: {
   coin: MarketCoin
   cashBalance: number
   quantityValue: string
+  amountUsdValue: string
   estimatedCost: number
   remainingCash: number
   isInvalid: boolean
   isPending: boolean
   error: string
   onQuantityChange: (value: string) => void
+  onAmountUsdChange: (value: string) => void
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
@@ -674,6 +694,21 @@ function TradeModal({
           type="number"
           min="0"
           step="0.00000001"
+          required
+          className="mt-2 h-11"
+        />
+
+        <label className="mt-4 block text-sm font-semibold text-slate-700" htmlFor="trade-amount">
+          USD
+        </label>
+        <Input
+          id="trade-amount"
+          value={amountUsdValue}
+          onChange={(event) => onAmountUsdChange(event.target.value)}
+          placeholder="0.00"
+          type="number"
+          min="0"
+          step="0.01"
           required
           className="mt-2 h-11"
         />
@@ -1043,11 +1078,11 @@ function PortfolioTable({
                 <span className="ml-2 text-slate-500">{row.name}</span>
               </Td>
               <Td className="text-right">{quantity(row.quantity)}</Td>
-              <Td className="text-right">{money(row.avgPrice)}</Td>
-              <Td className="text-right">{money(row.currentPrice)}</Td>
+              <Td className="text-right">{preciseMoney(row.avgPrice)}</Td>
+              <Td className="text-right">{preciseMoney(row.currentPrice)}</Td>
               <Td className="text-right">{money(row.marketValue)}</Td>
               <Td className={`text-right ${toneClass(row.unrealizedPnl)}`}>
-                {money(row.unrealizedPnl)}
+                {preciseMoney(row.unrealizedPnl)}
               </Td>
               <Td className={`text-right ${toneClass(row.unrealizedPnlPct)}`}>
                 {pct(row.unrealizedPnlPct)}
@@ -1112,10 +1147,10 @@ function TradeHistory({ trades }: { trades: Trade[] }) {
 
 function PerformancePanel({
   performance,
-  onSnapshot,
+  onRefresh,
 }: {
   performance?: Performance
-  onSnapshot: () => void
+  onRefresh: () => void
 }) {
   const points = performance?.points ?? []
   const stats = performance?.stats
@@ -1140,10 +1175,10 @@ function PerformancePanel({
           </div>
           <button
             className="inline-flex h-9 items-center gap-2 rounded bg-slate-900 px-3 text-sm font-semibold text-white"
-            onClick={onSnapshot}
+            onClick={onRefresh}
           >
-            <Save size={16} />
-            Snapshot today
+            <RefreshCw size={16} />
+            Refresh
           </button>
         </div>
         <div className="h-80">

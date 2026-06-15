@@ -18,6 +18,15 @@ export function money(value: number) {
   }).format(value);
 }
 
+export function preciseMoney(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 8,
+  }).format(value);
+}
+
 export function quantity(value: number) {
   return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 8,
