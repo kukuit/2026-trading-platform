@@ -97,7 +97,13 @@ export async function GET() {
     orderBy: { symbol: "asc" },
   });
 
-  const tickerBySymbol = await fetchBinanceTickers();
+  let tickerBySymbol = new Map<string, BinanceTicker>();
+
+  try {
+    tickerBySymbol = await fetchBinanceTickers();
+  } catch (error) {
+    console.warn("Unable to fetch live Binance tickers. Falling back to stored market data.", error);
+  }
   const snapshotDateLabel = appTodayInput();
   const snapshotDate = toDateOnly(snapshotDateLabel);
   const now = appNow();

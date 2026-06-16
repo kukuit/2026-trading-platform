@@ -15,15 +15,31 @@ async function main() {
   await seedCoins(prisma);
 
   const now = appNow();
+  const strategy = await prisma.strategy.upsert({
+    where: { id: "default-strategy" },
+    update: {},
+    create: {
+      id: "default-strategy",
+      note: "Default strategy for MVP testing.",
+      maxCoinCount: 10,
+      coinSelectionRule: "TOP_MARKET_CAP_100",
+      buyRule: "HIGHEST_24H_GROWTH",
+      sellRule: "REBALANCE_DAILY",
+    },
+  });
+
   const user = await prisma.user.upsert({
     where: { id: "demo-user" },
-    update: {},
+    update: {
+      strategyId: strategy.id,
+    },
     create: {
       id: "demo-user",
       name: "Demo Trader",
       description: "Paper trading account seeded for MVP testing.",
       startingBalance: 100000,
       currentBalance: 100000,
+      strategyId: strategy.id,
       createdAt: now,
     },
   });
