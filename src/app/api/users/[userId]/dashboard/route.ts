@@ -9,7 +9,10 @@ export async function GET(
   _request: Request,
   { params }: { params: { userId: string } },
 ) {
-  const user = await prisma.user.findUnique({ where: { id: params.userId } });
+  const user = await prisma.user.findUnique({
+    where: { id: params.userId },
+    include: { strategy: true },
+  });
   if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
   const currentBalance = decimalToNumber(user.currentBalance);
@@ -26,6 +29,17 @@ export async function GET(
       description: user.description,
       startingBalance,
       currentBalance,
+      strategyId: user.strategyId,
+      strategy: user.strategy
+        ? {
+            id: user.strategy.id,
+            note: user.strategy.note,
+            maxCoinCount: user.strategy.maxCoinCount,
+            coinSelectionRule: user.strategy.coinSelectionRule,
+            buyRule: user.strategy.buyRule,
+            sellRule: user.strategy.sellRule,
+          }
+        : null,
     },
     totals: {
       currentBalance,

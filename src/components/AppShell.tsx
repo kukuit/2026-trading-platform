@@ -12,8 +12,9 @@ import {
   BadgeDollarSign,
   X,
   UserPlus,
+  Users,
 } from 'lucide-react'
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -26,6 +27,27 @@ import {
   YAxis,
 } from 'recharts'
 import { money, preciseMoney, quantity } from '@/lib/serializers'
+import { USD_TO_VND_RATE } from '@/config/currency'
+
+type CoinSelectionRule =
+  | 'TOP_MARKET_CAP_100'
+  | 'TOP_MARKET_CAP_50'
+  | 'HIGHEST_VOLUME'
+  | 'HIGHEST_24H_GROWTH'
+  | 'HIGHEST_7D_GROWTH'
+
+type BuyRule = 'HIGHEST_24H_GROWTH' | 'HIGHEST_7D_GROWTH' | 'HIGHEST_VOLUME'
+
+type SellRule = 'REBALANCE_DAILY' | 'REBALANCE_WEEKLY' | 'TAKE_PROFIT' | 'STOP_LOSS'
+
+type Strategy = {
+  id: string
+  note: string | null
+  maxCoinCount: number
+  coinSelectionRule: CoinSelectionRule
+  buyRule: BuyRule
+  sellRule: SellRule
+}
 
 type User = {
   id: string
@@ -33,6 +55,8 @@ type User = {
   description: string | null
   startingBalance: number
   currentBalance: number
+  strategyId: string | null
+  strategy: Strategy | null
 }
 
 type MarketCoin = {
@@ -110,13 +134,22 @@ type Tab = (typeof tabs)[number]['id']
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
-  if (!response.ok) throw new Error(await response.text())
+  if (!response.ok) throw new Error(await readResponseError(response))
   return response.json()
+}
+
+async function readResponseError(response: Response) {
+  const message = await response.text()
+  return `Request failed (${response.status}): ${message || response.statusText}`
 }
 
 function pct(value: number | null) {
   if (value === null) return 'n/a'
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function chartDateLabel(value: string) {
+  return value.slice(5)
 }
 
 function toneClass(value: number | null) {
@@ -133,6 +166,28 @@ function usdNumber(value: number) {
 type MarketSortKey = 'symbol' | 'priceUsd' | 'change24h' | 'change7d' | 'marketCap' | 'volume24h'
 type SortDirection = 'asc' | 'desc'
 
+const SELECTED_USER_STORAGE_KEY = 'trading-platform:selected-user-id'
+
+const strategyRuleLabels: Record<CoinSelectionRule | BuyRule | SellRule, string> = {
+  TOP_MARKET_CAP_100: 'Top market cap 100',
+  TOP_MARKET_CAP_50: 'Top market cap 50',
+  HIGHEST_VOLUME: 'Highest volume',
+  HIGHEST_24H_GROWTH: 'Highest 24h growth',
+  HIGHEST_7D_GROWTH: 'Highest 7d growth',
+  REBALANCE_DAILY: 'Rebalance daily',
+  REBALANCE_WEEKLY: 'Rebalance weekly',
+  TAKE_PROFIT: 'Take profit',
+  STOP_LOSS: 'Stop loss',
+}
+
+function strategyName(strategy: Strategy) {
+  return `${strategyRuleLabels[strategy.coinSelectionRule]} / ${strategyRuleLabels[strategy.buyRule]} / ${strategyRuleLabels[strategy.sellRule]}`
+}
+
+function userStrategyName(user: User) {
+  return user.strategy ? strategyName(user.strategy) : 'No strategy assigned'
+}
+
 export default function AppShell() {
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<Tab>('market')
@@ -143,6 +198,8 @@ export default function AppShell() {
   const [tradeQuantity, setTradeQuantity] = useState('')
   const [tradeAmountUsd, setTradeAmountUsd] = useState('')
   const [isCreateUserOpen, setIsCreateUserOpen] = useState(false)
+  const [isUserPickerOpen, setIsUserPickerOpen] = useState(false)
+  const [hasLoadedStoredUser, setHasLoadedStoredUser] = useState(false)
   const [toast, setToast] = useState('')
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -157,8 +214,17 @@ export default function AppShell() {
     queryFn: () => fetchJson<{ users: User[] }>('/api/users'),
   })
 
-  const users = usersQuery.data?.users ?? []
-  const activeUserId = selectedUserId || users[0]?.id || ''
+  const strategiesQuery = useQuery({
+    queryKey: ['strategies'],
+    queryFn: () => fetchJson<{ strategies: Strategy[] }>('/api/strategies'),
+  })
+
+  const users = useMemo(() => usersQuery.data?.users ?? [], [usersQuery.data?.users])
+  const strategies = useMemo(
+    () => strategiesQuery.data?.strategies ?? [],
+    [strategiesQuery.data?.strategies],
+  )
+  const activeUserId = selectedUserId
   const activeUser = users.find((user) => user.id === activeUserId)
 
   const marketQuery = useQuery({
@@ -191,19 +257,36 @@ export default function AppShell() {
     queryFn: () => fetchJson<Performance>(`/api/users/${activeUserId}/performance`),
   })
 
-  const refreshUserData = () => {
+  const refreshUserData = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['users'] })
     queryClient.invalidateQueries({ queryKey: ['dashboard', activeUserId] })
     queryClient.invalidateQueries({ queryKey: ['portfolio', activeUserId] })
     queryClient.invalidateQueries({ queryKey: ['trades', activeUserId] })
     queryClient.invalidateQueries({ queryKey: ['performance', activeUserId] })
-  }
+  }, [activeUserId, queryClient])
 
   useEffect(() => {
     if (marketQuery.dataUpdatedAt) {
       refreshUserData()
     }
-  }, [marketQuery.dataUpdatedAt])
+  }, [marketQuery.dataUpdatedAt, refreshUserData])
+
+  useEffect(() => {
+    const storedUserId = window.localStorage.getItem(SELECTED_USER_STORAGE_KEY) ?? ''
+    setSelectedUserId(storedUserId)
+    setHasLoadedStoredUser(true)
+  }, [])
+
+  useEffect(() => {
+    if (!hasLoadedStoredUser || !usersQuery.isSuccess || usersQuery.isFetching) return
+    if (!users.length) {
+      setIsUserPickerOpen(false)
+      return
+    }
+
+    const hasSelectedUser = Boolean(selectedUserId && users.some((user) => user.id === selectedUserId))
+    setIsUserPickerOpen(!hasSelectedUser)
+  }, [hasLoadedStoredUser, selectedUserId, users, usersQuery.isFetching, usersQuery.isSuccess])
 
   const createUserMutation = useMutation({
     mutationFn: async (form: FormData) => {
@@ -214,14 +297,17 @@ export default function AppShell() {
           name: String(form.get('name') ?? ''),
           description: String(form.get('description') ?? ''),
           startingBalance: Number(form.get('startingBalance') ?? 0),
+          strategyId: String(form.get('strategyId') ?? ''),
         }),
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw new Error(await readResponseError(response))
       return response.json() as Promise<{ userId: string }>
     },
     onSuccess: ({ userId }) => {
       setSelectedUserId(userId)
+      window.localStorage.setItem(SELECTED_USER_STORAGE_KEY, userId)
       setIsCreateUserOpen(false)
+      setIsUserPickerOpen(false)
       queryClient.invalidateQueries({ queryKey: ['users'] })
     },
   })
@@ -231,7 +317,7 @@ export default function AppShell() {
       const response = await fetch('/api/market-cap', {
         method: 'POST',
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw new Error(await readResponseError(response))
       return response.json() as Promise<{ updated: number }>
     },
     onSuccess: ({ updated }) => {
@@ -254,7 +340,7 @@ export default function AppShell() {
           quantity: Number(tradeQuantity),
         }),
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw new Error(await readResponseError(response))
       return response.json()
     },
     onSuccess: () => {
@@ -263,7 +349,7 @@ export default function AppShell() {
       setTradeAmountUsd('')
       setTradeCoinId(null)
       setSellHolding(null)
-      showToast(`${tradeMode} ${coinSymbol ?? 'coin'} thành công`)
+      showToast(`${tradeMode} ${coinSymbol ?? 'coin'} completed`)
       refreshUserData()
     },
   })
@@ -304,6 +390,12 @@ export default function AppShell() {
     event.preventDefault()
     createUserMutation.mutate(new FormData(event.currentTarget))
     event.currentTarget.reset()
+  }
+
+  const handleSelectUser = (userId: string) => {
+    setSelectedUserId(userId)
+    window.localStorage.setItem(SELECTED_USER_STORAGE_KEY, userId)
+    setIsUserPickerOpen(false)
   }
 
   const handleTrade = (event: FormEvent<HTMLFormElement>) => {
@@ -373,17 +465,14 @@ export default function AppShell() {
               </h1>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <select
-                className="h-10 min-w-56 rounded border border-slate-300 bg-white px-3 text-sm"
-                value={activeUserId}
-                onChange={(event) => setSelectedUserId(event.target.value)}
+              <button
+                className="inline-flex h-10 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+                onClick={() => setIsUserPickerOpen(true)}
+                aria-label="Select user"
               >
-                {users.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    {user.name}
-                  </option>
-                ))}
-              </select>
+                <Users size={16} />
+                <span className="max-w-44 truncate">{activeUser?.name ?? 'Select user'}</span>
+              </button>
               <button
                 className="inline-flex h-10 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800"
                 onClick={() => {
@@ -467,7 +556,7 @@ export default function AppShell() {
 
           {(tradeMutation.error || marketCapMutation.error || createUserMutation.error) && (
             <div className="rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-              Có lỗi khi xử lý dữ liệu. Kiểm tra input, số dư hoặc số lượng coin.
+              Something went wrong while processing data. Check the input, balance, or coin quantity.
             </div>
           )}
         </section>
@@ -475,13 +564,30 @@ export default function AppShell() {
 
       {isCreateUserOpen && (
         <CreateUserModal
+          strategies={strategies}
+          isLoadingStrategies={strategiesQuery.isLoading}
           isPending={createUserMutation.isPending}
-          error={createUserMutation.error ? 'Khong the tao user. Kiem tra lai thong tin.' : ''}
+          error={createUserMutation.error ? `Unable to create user. ${createUserMutation.error.message}` : ''}
           onClose={() => {
             setIsCreateUserOpen(false)
             createUserMutation.reset()
           }}
           onSubmit={handleCreateUser}
+        />
+      )}
+
+      {isUserPickerOpen && (
+        <UserPickerModal
+          users={users}
+          selectedUserId={activeUserId}
+          isLoading={usersQuery.isLoading}
+          onSelect={handleSelectUser}
+          onCreateUser={() => {
+            createUserMutation.reset()
+            setIsUserPickerOpen(false)
+            setIsCreateUserOpen(true)
+          }}
+          onClose={() => setIsUserPickerOpen(false)}
         />
       )}
 
@@ -496,7 +602,7 @@ export default function AppShell() {
           isInvalid={tradeQuantityInvalid}
           isPending={tradeMutation.isPending}
           error={
-            tradeMutation.error ? 'Không thể mua coin này. Kiểm tra số dư hoặc dữ liệu giá.' : ''
+            tradeMutation.error ? `Unable to buy this coin. ${tradeMutation.error.message}` : ''
           }
           onQuantityChange={handleBuyQuantityChange}
           onAmountUsdChange={handleBuyAmountUsdChange}
@@ -519,7 +625,7 @@ export default function AppShell() {
           isInvalid={tradeQuantityInvalid}
           isPending={tradeMutation.isPending}
           error={
-            tradeMutation.error ? 'Không thể bán coin này. Kiểm tra số lượng đang nắm giữ.' : ''
+            tradeMutation.error ? `Unable to sell this coin. ${tradeMutation.error.message}` : ''
           }
           onQuantityChange={setTradeQuantity}
           onSellAll={() => setTradeQuantity(String(sellHolding.quantity))}
@@ -563,17 +669,67 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   )
 }
 
+function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      {...props}
+      className={`min-h-24 w-full rounded border border-slate-300 bg-white px-2 py-2 text-sm outline-none focus:border-teal-700 ${props.className ?? ''}`}
+    />
+  )
+}
+
 function CreateUserModal({
+  strategies,
+  isLoadingStrategies,
   isPending,
   error,
   onClose,
   onSubmit,
 }: {
+  strategies: Strategy[]
+  isLoadingStrategies: boolean
   isPending: boolean
   error: string
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
+  const [startingBalanceUsd, setStartingBalanceUsd] = useState('100000')
+  const [startingBalanceVnd, setStartingBalanceVnd] = useState(
+    String(100000 * USD_TO_VND_RATE),
+  )
+  const [selectedStrategyId, setSelectedStrategyId] = useState(strategies[0]?.id ?? '')
+
+  useEffect(() => {
+    if (!selectedStrategyId && strategies[0]) {
+      setSelectedStrategyId(strategies[0].id)
+    }
+  }, [selectedStrategyId, strategies])
+
+  const formatUsdInput = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return ''
+    return value.toFixed(2).replace(/\.00$/, '')
+  }
+
+  const handleUsdChange = (value: string) => {
+    setStartingBalanceUsd(value)
+    const numericValue = Number(value)
+    setStartingBalanceVnd(
+      Number.isFinite(numericValue) && numericValue > 0
+        ? String(Math.round(numericValue * USD_TO_VND_RATE))
+        : '',
+    )
+  }
+
+  const handleVndChange = (value: string) => {
+    setStartingBalanceVnd(value)
+    const numericValue = Number(value)
+    setStartingBalanceUsd(
+      Number.isFinite(numericValue) && numericValue > 0
+        ? formatUsdInput(numericValue / USD_TO_VND_RATE)
+        : '',
+    )
+  }
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4 py-6">
       <form
@@ -599,14 +755,71 @@ function CreateUserModal({
 
         <div className="mt-5 space-y-3">
           <Input name="name" placeholder="Name" required />
-          <Input name="description" placeholder="Description" />
-          <Input
-            name="startingBalance"
-            placeholder="Starting balance"
-            type="number"
-            defaultValue="100000"
-            required
-          />
+          <Textarea name="description" placeholder="Description" />
+          <div>
+            <label
+              className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+              htmlFor="user-strategy"
+            >
+              Strategy
+            </label>
+            <select
+              id="user-strategy"
+              name="strategyId"
+              required
+              disabled={isLoadingStrategies || !strategies.length}
+              className="h-11 w-full rounded border border-slate-300 bg-white px-2 text-sm outline-none focus:border-teal-700 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+              value={selectedStrategyId}
+              onChange={(event) => setSelectedStrategyId(event.target.value)}
+            >
+              <option value="" disabled>
+                {isLoadingStrategies ? 'Loading strategies' : 'Select strategy'}
+              </option>
+              {strategies.map((strategy) => (
+                <option key={strategy.id} value={strategy.id}>
+                  {strategyName(strategy)} - max {strategy.maxCoinCount} coins
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                USD
+              </label>
+              <Input
+                name="startingBalance"
+                placeholder="Starting balance"
+                type="number"
+                min="0"
+                step="0.01"
+                value={startingBalanceUsd}
+                onChange={(event) => handleUsdChange(event.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                VND
+              </label>
+              <Input
+                placeholder="Amount in VND"
+                type="number"
+                min="0"
+                step="1000"
+                value={startingBalanceVnd}
+                onChange={(event) => handleVndChange(event.target.value)}
+              />
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">
+            1 USD = {new Intl.NumberFormat('vi-VN').format(USD_TO_VND_RATE)} VND
+          </p>
+          {!isLoadingStrategies && !strategies.length && (
+            <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Create a strategy through the Strategy API before creating a user.
+            </p>
+          )}
         </div>
 
         {error && (
@@ -616,13 +829,111 @@ function CreateUserModal({
         )}
 
         <button
-          disabled={isPending}
+          disabled={isPending || isLoadingStrategies || !strategies.length}
           className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded bg-teal-700 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isPending ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
           Create User
         </button>
       </form>
+    </div>
+  )
+}
+
+function UserPickerModal({
+  users,
+  selectedUserId,
+  isLoading,
+  onSelect,
+  onCreateUser,
+  onClose,
+}: {
+  users: User[]
+  selectedUserId: string
+  isLoading: boolean
+  onSelect: (userId: string) => void
+  onCreateUser: () => void
+  onClose: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4 py-6">
+      <div className="w-full max-w-2xl rounded border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-wide text-teal-700">
+              Select User
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-950">Trading accounts</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-slate-300 text-slate-600"
+            aria-label="Close user picker"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="mt-5 overflow-x-auto rounded border border-slate-200">
+          <table className="min-w-[560px] w-full text-left text-sm">
+            <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
+              <tr>
+                <Th>User</Th>
+                <Th>Description</Th>
+                <Th>Strategy</Th>
+                <Th className="text-right">Cash</Th>
+                <Th></Th>
+              </tr>
+            </thead>
+            <tbody>
+              {isLoading && <EmptyRow colSpan={5} text="Loading users." />}
+              {!isLoading &&
+                users.map((user) => {
+                  const isSelected = user.id === selectedUserId
+                  return (
+                    <tr key={user.id} className="border-t border-slate-100">
+                      <Td>
+                        <span className="font-semibold text-slate-950">{user.name}</span>
+                        {isSelected && (
+                          <span className="ml-2 rounded bg-teal-50 px-2 py-1 text-xs font-semibold text-teal-700">
+                            Selected
+                          </span>
+                        )}
+                      </Td>
+                      <Td className="max-w-64 truncate text-slate-600">
+                        {user.description || 'No description'}
+                      </Td>
+                      <Td className="max-w-72 truncate text-slate-600">
+                        {userStrategyName(user)}
+                      </Td>
+                      <Td className="text-right">{money(user.currentBalance)}</Td>
+                      <Td>
+                        <button
+                          className="h-8 rounded bg-teal-700 px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={isSelected}
+                          onClick={() => onSelect(user.id)}
+                        >
+                          Select
+                        </button>
+                      </Td>
+                    </tr>
+                  )
+                })}
+              {!isLoading && !users.length && <EmptyRow colSpan={5} text="No users available." />}
+            </tbody>
+          </table>
+        </div>
+
+        <button
+          type="button"
+          onClick={onCreateUser}
+          className="mt-4 inline-flex h-10 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800"
+        >
+          <UserPlus size={16} />
+          Create User
+        </button>
+      </div>
     </div>
   )
 }
@@ -734,7 +1045,7 @@ function TradeModal({
 
         {isInvalid && (
           <p className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
-            Quantity không hợp lệ hoặc số tiền mua vượt quá số dư hiện tại.
+            Quantity is invalid or the purchase amount exceeds the current cash balance.
           </p>
         )}
         {error && (
@@ -852,7 +1163,7 @@ function SellModal({
 
         {isInvalid && (
           <p className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
-            Quantity không hợp lệ hoặc vượt quá số lượng đang nắm giữ.
+            Quantity is invalid or exceeds the current holding quantity.
           </p>
         )}
         {error && (
@@ -1185,7 +1496,7 @@ function PerformancePanel({
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={points}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+              <XAxis dataKey="date" tick={{ fontSize: 12 }} tickFormatter={chartDateLabel} />
               <YAxis
                 tick={{ fontSize: 12 }}
                 tickFormatter={(value) => `$${Math.round(Number(value) / 1000)}k`}

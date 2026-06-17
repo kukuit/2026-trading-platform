@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
@@ -16,9 +16,6 @@
     "start:local": "NODE_ENV=production next start -p 3000",
     "db:seed": "prisma db seed",
     "seed:coins": "node prisma/seed-coins.mjs"
-  },
-  "prisma": {
-    "seed": "node prisma/seed.mjs"
   },
   "dependencies": {
     "@next/third-parties": "^16.1.1",
