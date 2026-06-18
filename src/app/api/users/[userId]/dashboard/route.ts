@@ -30,6 +30,7 @@ export async function GET(
       startingBalance,
       currentBalance,
       strategyId: user.strategyId,
+      status: user.status,
       strategy: user.strategy
         ? {
             id: user.strategy.id,

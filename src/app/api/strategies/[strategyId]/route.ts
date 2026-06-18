@@ -1,23 +1,23 @@
 import { NextResponse } from "next/server";
-import { BuyRule, CoinSelectionRule, Prisma, SellRule } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 
 const strategySchema = z.object({
   note: z.string().optional().nullable(),
-  maxCoinCount: z.coerce.number().int().positive(),
-  coinSelectionRule: z.nativeEnum(CoinSelectionRule),
-  buyRule: z.nativeEnum(BuyRule),
-  sellRule: z.nativeEnum(SellRule),
+  maxCoinCount: z.coerce.number().int().positive().nullable().optional(),
+  coinSelectionRule: z.string().trim().nullable().optional(),
+  buyRule: z.string().trim().nullable().optional(),
+  sellRule: z.string().trim().nullable().optional(),
 });
 
 function serializeStrategy(strategy: {
   id: string;
   note: string | null;
-  maxCoinCount: number;
-  coinSelectionRule: CoinSelectionRule;
-  buyRule: BuyRule;
-  sellRule: SellRule;
+  maxCoinCount: number | null;
+  coinSelectionRule: string | null;
+  buyRule: string | null;
+  sellRule: string | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
@@ -65,9 +65,9 @@ export async function PUT(
       data: {
         note: payload.note?.trim() || null,
         maxCoinCount: payload.maxCoinCount,
-        coinSelectionRule: payload.coinSelectionRule,
-        buyRule: payload.buyRule,
-        sellRule: payload.sellRule,
+        coinSelectionRule: payload.coinSelectionRule || null,
+        buyRule: payload.buyRule || null,
+        sellRule: payload.sellRule || null,
       },
     });
 

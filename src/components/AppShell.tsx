@@ -7,11 +7,14 @@ import {
   LayoutDashboard,
   LineChart,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   BadgeDollarSign,
   X,
+  UserCheck,
   UserPlus,
+  UserX,
   Users,
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -29,24 +32,13 @@ import {
 import { money, preciseMoney, quantity } from '@/lib/serializers'
 import { USD_TO_VND_RATE } from '@/config/currency'
 
-type CoinSelectionRule =
-  | 'TOP_MARKET_CAP_100'
-  | 'TOP_MARKET_CAP_50'
-  | 'HIGHEST_VOLUME'
-  | 'HIGHEST_24H_GROWTH'
-  | 'HIGHEST_7D_GROWTH'
-
-type BuyRule = 'HIGHEST_24H_GROWTH' | 'HIGHEST_7D_GROWTH' | 'HIGHEST_VOLUME'
-
-type SellRule = 'REBALANCE_DAILY' | 'REBALANCE_WEEKLY' | 'TAKE_PROFIT' | 'STOP_LOSS'
-
 type Strategy = {
   id: string
   note: string | null
-  maxCoinCount: number
-  coinSelectionRule: CoinSelectionRule
-  buyRule: BuyRule
-  sellRule: SellRule
+  maxCoinCount: number | null
+  coinSelectionRule: string | null
+  buyRule: string | null
+  sellRule: string | null
 }
 
 type User = {
@@ -56,6 +48,7 @@ type User = {
   startingBalance: number
   currentBalance: number
   strategyId: string | null
+  status: number
   strategy: Strategy | null
 }
 
@@ -168,7 +161,7 @@ type SortDirection = 'asc' | 'desc'
 
 const SELECTED_USER_STORAGE_KEY = 'trading-platform:selected-user-id'
 
-const strategyRuleLabels: Record<CoinSelectionRule | BuyRule | SellRule, string> = {
+const strategyRuleLabels: Record<string, string> = {
   TOP_MARKET_CAP_100: 'Top market cap 100',
   TOP_MARKET_CAP_50: 'Top market cap 50',
   HIGHEST_VOLUME: 'Highest volume',
@@ -180,12 +173,84 @@ const strategyRuleLabels: Record<CoinSelectionRule | BuyRule | SellRule, string>
   STOP_LOSS: 'Stop loss',
 }
 
+const DEFAULT_STARTING_BALANCE_VND = '100000000'
+
+function optionalNumberFromForm(form: FormData, name: string) {
+  const value = String(form.get(name) ?? '').trim()
+  if (!value) return null
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) ? numericValue : null
+}
+
+function optionalTextFromForm(form: FormData, name: string) {
+  const value = String(form.get(name) ?? '').trim()
+  return value || null
+}
+
+function createUserPayloadFromForm(form: FormData) {
+  return {
+    name: String(form.get('name') ?? '').trim(),
+    description: String(form.get('description') ?? '').trim(),
+    startingBalance: Number(form.get('startingBalance') ?? 0),
+    maxCoinCount: optionalNumberFromForm(form, 'maxCoinCount'),
+    coinSelectionRule: optionalTextFromForm(form, 'coinSelectionRule'),
+    buyRule: optionalTextFromForm(form, 'buyRule'),
+    sellRule: optionalTextFromForm(form, 'sellRule'),
+  }
+}
+
+function updateUserPayloadFromForm(form: FormData) {
+  return {
+    name: String(form.get('name') ?? '').trim(),
+    description: String(form.get('description') ?? '').trim(),
+    maxCoinCount: optionalNumberFromForm(form, 'maxCoinCount'),
+    coinSelectionRule: optionalTextFromForm(form, 'coinSelectionRule'),
+    buyRule: optionalTextFromForm(form, 'buyRule'),
+    sellRule: optionalTextFromForm(form, 'sellRule'),
+  }
+}
+
+function formatUsdInput(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return ''
+  return value.toFixed(2).replace(/\.00$/, '')
+}
+
+function strategyRuleLabel(rule: string | null) {
+  if (!rule) return '-'
+  return strategyRuleLabels[rule] ?? rule
+}
+
 function strategyName(strategy: Strategy) {
-  return `${strategyRuleLabels[strategy.coinSelectionRule]} / ${strategyRuleLabels[strategy.buyRule]} / ${strategyRuleLabels[strategy.sellRule]}`
+  return `${strategyRuleLabel(strategy.coinSelectionRule)} / ${strategyRuleLabel(strategy.buyRule)} / ${strategyRuleLabel(strategy.sellRule)}`
 }
 
 function userStrategyName(user: User) {
   return user.strategy ? strategyName(user.strategy) : 'No strategy assigned'
+}
+
+function UserStrategyDetails({ user }: { user: User }) {
+  if (!user.strategy) return <span>No strategy assigned</span>
+
+  return (
+    <div className="space-y-1 text-xs leading-5">
+      <p>
+        <span className="font-semibold text-slate-700">Max coin count:</span>{' '}
+        {user.strategy.maxCoinCount ?? '-'}
+      </p>
+      <p>
+        <span className="font-semibold text-slate-700">Coin selection rule:</span>{' '}
+        {strategyRuleLabel(user.strategy.coinSelectionRule)}
+      </p>
+      <p>
+        <span className="font-semibold text-slate-700">Buy rule:</span>{' '}
+        {strategyRuleLabel(user.strategy.buyRule)}
+      </p>
+      <p>
+        <span className="font-semibold text-slate-700">Sell rule:</span>{' '}
+        {strategyRuleLabel(user.strategy.sellRule)}
+      </p>
+    </div>
+  )
 }
 
 export default function AppShell() {
@@ -199,6 +264,7 @@ export default function AppShell() {
   const [tradeAmountUsd, setTradeAmountUsd] = useState('')
   const [isCreateUserOpen, setIsCreateUserOpen] = useState(false)
   const [isUserPickerOpen, setIsUserPickerOpen] = useState(false)
+  const [editingUserId, setEditingUserId] = useState<string | null>(null)
   const [hasLoadedStoredUser, setHasLoadedStoredUser] = useState(false)
   const [toast, setToast] = useState('')
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -214,18 +280,10 @@ export default function AppShell() {
     queryFn: () => fetchJson<{ users: User[] }>('/api/users'),
   })
 
-  const strategiesQuery = useQuery({
-    queryKey: ['strategies'],
-    queryFn: () => fetchJson<{ strategies: Strategy[] }>('/api/strategies'),
-  })
-
   const users = useMemo(() => usersQuery.data?.users ?? [], [usersQuery.data?.users])
-  const strategies = useMemo(
-    () => strategiesQuery.data?.strategies ?? [],
-    [strategiesQuery.data?.strategies],
-  )
   const activeUserId = selectedUserId
   const activeUser = users.find((user) => user.id === activeUserId)
+  const editingUser = users.find((user) => user.id === editingUserId)
 
   const marketQuery = useQuery({
     queryKey: ['market'],
@@ -284,7 +342,13 @@ export default function AppShell() {
       return
     }
 
-    const hasSelectedUser = Boolean(selectedUserId && users.some((user) => user.id === selectedUserId))
+    const hasSelectedUser = Boolean(
+      selectedUserId && users.some((user) => user.id === selectedUserId && user.status === 1),
+    )
+    if (selectedUserId && !hasSelectedUser) {
+      setSelectedUserId('')
+      window.localStorage.removeItem(SELECTED_USER_STORAGE_KEY)
+    }
     setIsUserPickerOpen(!hasSelectedUser)
   }, [hasLoadedStoredUser, selectedUserId, users, usersQuery.isFetching, usersQuery.isSuccess])
 
@@ -293,12 +357,7 @@ export default function AppShell() {
       const response = await fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: String(form.get('name') ?? ''),
-          description: String(form.get('description') ?? ''),
-          startingBalance: Number(form.get('startingBalance') ?? 0),
-          strategyId: String(form.get('strategyId') ?? ''),
-        }),
+        body: JSON.stringify(createUserPayloadFromForm(form)),
       })
       if (!response.ok) throw new Error(await readResponseError(response))
       return response.json() as Promise<{ userId: string }>
@@ -309,6 +368,48 @@ export default function AppShell() {
       setIsCreateUserOpen(false)
       setIsUserPickerOpen(false)
       queryClient.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+
+  const updateUserMutation = useMutation({
+    mutationFn: async ({ userId, form }: { userId: string; form: FormData }) => {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updateUserPayloadFromForm(form)),
+      })
+      if (!response.ok) throw new Error(await readResponseError(response))
+      return response.json() as Promise<{ userId: string }>
+    },
+    onSuccess: ({ userId }) => {
+      setEditingUserId(null)
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard', userId] })
+      queryClient.invalidateQueries({ queryKey: ['performance', userId] })
+    },
+  })
+
+  const updateUserStatusMutation = useMutation({
+    mutationFn: async ({ userId, status }: { userId: string; status: 0 | 1 }) => {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      if (!response.ok) throw new Error(await readResponseError(response))
+      return response.json() as Promise<{ userId: string; status: 0 | 1 }>
+    },
+    onSuccess: ({ userId, status }) => {
+      if (status === 0 && userId === activeUserId) {
+        setSelectedUserId('')
+        window.localStorage.removeItem(SELECTED_USER_STORAGE_KEY)
+        setIsUserPickerOpen(true)
+      }
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard', userId] })
+      queryClient.invalidateQueries({ queryKey: ['portfolio', userId] })
+      queryClient.invalidateQueries({ queryKey: ['trades', userId] })
+      queryClient.invalidateQueries({ queryKey: ['performance', userId] })
     },
   })
 
@@ -392,10 +493,28 @@ export default function AppShell() {
     event.currentTarget.reset()
   }
 
+  const handleUpdateUser = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!editingUserId) return
+    updateUserMutation.mutate({ userId: editingUserId, form: new FormData(event.currentTarget) })
+  }
+
   const handleSelectUser = (userId: string) => {
     setSelectedUserId(userId)
     window.localStorage.setItem(SELECTED_USER_STORAGE_KEY, userId)
     setIsUserPickerOpen(false)
+  }
+
+  const handleToggleUserStatus = (user: User) => {
+    const status = user.status === 1 ? 0 : 1
+    if (
+      status === 0 &&
+      !window.confirm(`Disable ${user.name}? This account will be hidden from the active user list.`)
+    ) {
+      return
+    }
+
+    updateUserStatusMutation.mutate({ userId: user.id, status })
   }
 
   const handleTrade = (event: FormEvent<HTMLFormElement>) => {
@@ -554,7 +673,11 @@ export default function AppShell() {
             />
           )}
 
-          {(tradeMutation.error || marketCapMutation.error || createUserMutation.error) && (
+          {(tradeMutation.error ||
+            marketCapMutation.error ||
+            createUserMutation.error ||
+            updateUserMutation.error ||
+            updateUserStatusMutation.error) && (
             <div className="rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
               Something went wrong while processing data. Check the input, balance, or coin quantity.
             </div>
@@ -564,8 +687,6 @@ export default function AppShell() {
 
       {isCreateUserOpen && (
         <CreateUserModal
-          strategies={strategies}
-          isLoadingStrategies={strategiesQuery.isLoading}
           isPending={createUserMutation.isPending}
           error={createUserMutation.error ? `Unable to create user. ${createUserMutation.error.message}` : ''}
           onClose={() => {
@@ -581,13 +702,36 @@ export default function AppShell() {
           users={users}
           selectedUserId={activeUserId}
           isLoading={usersQuery.isLoading}
+          isStatusPending={updateUserStatusMutation.isPending}
           onSelect={handleSelectUser}
+          onToggleStatus={handleToggleUserStatus}
           onCreateUser={() => {
             createUserMutation.reset()
+            updateUserMutation.reset()
+            updateUserStatusMutation.reset()
             setIsUserPickerOpen(false)
             setIsCreateUserOpen(true)
           }}
+          onEditUser={(userId) => {
+            updateUserMutation.reset()
+            updateUserStatusMutation.reset()
+            setEditingUserId(userId)
+          }}
           onClose={() => setIsUserPickerOpen(false)}
+        />
+      )}
+
+      {editingUser && (
+        <EditUserModal
+          key={editingUser.id}
+          user={editingUser}
+          isPending={updateUserMutation.isPending}
+          error={updateUserMutation.error ? `Unable to update user. ${updateUserMutation.error.message}` : ''}
+          onClose={() => {
+            setEditingUserId(null)
+            updateUserMutation.reset()
+          }}
+          onSubmit={handleUpdateUser}
         />
       )}
 
@@ -669,45 +813,47 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   )
 }
 
-function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return (
-    <textarea
-      {...props}
-      className={`min-h-24 w-full rounded border border-slate-300 bg-white px-2 py-2 text-sm outline-none focus:border-teal-700 ${props.className ?? ''}`}
-    />
-  )
-}
-
 function CreateUserModal({
-  strategies,
-  isLoadingStrategies,
   isPending,
   error,
   onClose,
   onSubmit,
 }: {
-  strategies: Strategy[]
-  isLoadingStrategies: boolean
   isPending: boolean
   error: string
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
-  const [startingBalanceUsd, setStartingBalanceUsd] = useState('100000')
-  const [startingBalanceVnd, setStartingBalanceVnd] = useState(
-    String(100000 * USD_TO_VND_RATE),
+  const [startingBalanceUsd, setStartingBalanceUsd] = useState(
+    formatUsdInput(Number(DEFAULT_STARTING_BALANCE_VND) / USD_TO_VND_RATE),
   )
-  const [selectedStrategyId, setSelectedStrategyId] = useState(strategies[0]?.id ?? '')
+  const [startingBalanceVnd, setStartingBalanceVnd] = useState(DEFAULT_STARTING_BALANCE_VND)
+  const [validationError, setValidationError] = useState('')
 
-  useEffect(() => {
-    if (!selectedStrategyId && strategies[0]) {
-      setSelectedStrategyId(strategies[0].id)
-    }
-  }, [selectedStrategyId, strategies])
-
-  const formatUsdInput = (value: number) => {
+  function formatUsdInput(value: number) {
     if (!Number.isFinite(value) || value <= 0) return ''
     return value.toFixed(2).replace(/\.00$/, '')
+  }
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    const form = new FormData(event.currentTarget)
+    const name = String(form.get('name') ?? '').trim()
+    const startingBalance = Number(form.get('startingBalance') ?? 0)
+
+    if (!name) {
+      event.preventDefault()
+      setValidationError('Name is required.')
+      return
+    }
+
+    if (!Number.isFinite(startingBalance) || startingBalance <= 0) {
+      event.preventDefault()
+      setValidationError('USD must be greater than 0.')
+      return
+    }
+
+    setValidationError('')
+    onSubmit(event)
   }
 
   const handleUsdChange = (value: string) => {
@@ -733,7 +879,7 @@ function CreateUserModal({
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4 py-6">
       <form
-        onSubmit={onSubmit}
+        onSubmit={handleSubmit}
         className="w-full max-w-md rounded border border-slate-200 bg-white p-5 shadow-2xl"
       >
         <div className="flex items-start justify-between gap-4">
@@ -755,32 +901,37 @@ function CreateUserModal({
 
         <div className="mt-5 space-y-3">
           <Input name="name" placeholder="Name" required />
-          <Textarea name="description" placeholder="Description" />
-          <div>
-            <label
-              className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
-              htmlFor="user-strategy"
-            >
-              Strategy
-            </label>
-            <select
-              id="user-strategy"
-              name="strategyId"
-              required
-              disabled={isLoadingStrategies || !strategies.length}
-              className="h-11 w-full rounded border border-slate-300 bg-white px-2 text-sm outline-none focus:border-teal-700 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
-              value={selectedStrategyId}
-              onChange={(event) => setSelectedStrategyId(event.target.value)}
-            >
-              <option value="" disabled>
-                {isLoadingStrategies ? 'Loading strategies' : 'Select strategy'}
-              </option>
-              {strategies.map((strategy) => (
-                <option key={strategy.id} value={strategy.id}>
-                  {strategyName(strategy)} - max {strategy.maxCoinCount} coins
-                </option>
-              ))}
-            </select>
+          <Input name="description" placeholder="Description" />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+                htmlFor="max-coin-count"
+              >
+                Max coin count
+              </label>
+              <Input
+                id="max-coin-count"
+                name="maxCoinCount"
+                placeholder="Max coin count"
+                inputMode="numeric"
+              />
+            </div>
+            <LabeledTextInput
+              id="coin-selection-rule"
+              name="coinSelectionRule"
+              label="Coin selection rule"
+            />
+            <LabeledTextInput
+              id="buy-rule"
+              name="buyRule"
+              label="Buy rule"
+            />
+            <LabeledTextInput
+              id="sell-rule"
+              name="sellRule"
+              label="Sell rule"
+            />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
@@ -791,7 +942,7 @@ function CreateUserModal({
                 name="startingBalance"
                 placeholder="Starting balance"
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 value={startingBalanceUsd}
                 onChange={(event) => handleUsdChange(event.target.value)}
@@ -815,21 +966,16 @@ function CreateUserModal({
           <p className="text-xs text-slate-500">
             1 USD = {new Intl.NumberFormat('vi-VN').format(USD_TO_VND_RATE)} VND
           </p>
-          {!isLoadingStrategies && !strategies.length && (
-            <p className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              Create a strategy through the Strategy API before creating a user.
-            </p>
-          )}
         </div>
 
-        {error && (
+        {(validationError || error) && (
           <p className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
-            {error}
+            {validationError || error}
           </p>
         )}
 
         <button
-          disabled={isPending || isLoadingStrategies || !strategies.length}
+          disabled={isPending}
           className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded bg-teal-700 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isPending ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
@@ -840,24 +986,170 @@ function CreateUserModal({
   )
 }
 
+function EditUserModal({
+  user,
+  isPending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  user: User
+  isPending: boolean
+  error: string
+  onClose: () => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+}) {
+  const [validationError, setValidationError] = useState('')
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    const form = new FormData(event.currentTarget)
+    const name = String(form.get('name') ?? '').trim()
+
+    if (!name) {
+      event.preventDefault()
+      setValidationError('Name is required.')
+      return
+    }
+
+    setValidationError('')
+    onSubmit(event)
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 py-6">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-md rounded border border-slate-200 bg-white p-5 shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-wide text-teal-700">
+              Edit User
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-950">Trading account</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-slate-300 text-slate-600"
+            aria-label="Close edit user modal"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-3">
+          <Input name="name" placeholder="Name" defaultValue={user.name} required />
+          <Input name="description" placeholder="Description" defaultValue={user.description ?? ''} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label
+                className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+                htmlFor="edit-max-coin-count"
+              >
+                Max coin count
+              </label>
+              <Input
+                id="edit-max-coin-count"
+                name="maxCoinCount"
+                placeholder="Max coin count"
+                inputMode="numeric"
+                defaultValue={user.strategy?.maxCoinCount ?? ''}
+              />
+            </div>
+            <LabeledTextInput
+              id="edit-coin-selection-rule"
+              name="coinSelectionRule"
+              label="Coin selection rule"
+              defaultValue={user.strategy?.coinSelectionRule ?? ''}
+            />
+            <LabeledTextInput
+              id="edit-buy-rule"
+              name="buyRule"
+              label="Buy rule"
+              defaultValue={user.strategy?.buyRule ?? ''}
+            />
+            <LabeledTextInput
+              id="edit-sell-rule"
+              name="sellRule"
+              label="Sell rule"
+              defaultValue={user.strategy?.sellRule ?? ''}
+            />
+          </div>
+        </div>
+
+        {(validationError || error) && (
+          <p className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+            {validationError || error}
+          </p>
+        )}
+
+        <button
+          disabled={isPending}
+          className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded bg-teal-700 px-4 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isPending ? <Loader2 size={16} className="animate-spin" /> : <Pencil size={16} />}
+          Save User
+        </button>
+      </form>
+    </div>
+  )
+}
+
+function LabeledTextInput({
+  id,
+  name,
+  label,
+  defaultValue,
+}: {
+  id: string
+  name: string
+  label: string
+  defaultValue?: string
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor={id}>
+        {label}
+      </label>
+      <Input
+        id={id}
+        name={name}
+        defaultValue={defaultValue}
+      />
+    </div>
+  )
+}
+
 function UserPickerModal({
   users,
   selectedUserId,
   isLoading,
+  isStatusPending,
   onSelect,
+  onToggleStatus,
   onCreateUser,
+  onEditUser,
   onClose,
 }: {
   users: User[]
   selectedUserId: string
   isLoading: boolean
+  isStatusPending: boolean
   onSelect: (userId: string) => void
+  onToggleStatus: (user: User) => void
   onCreateUser: () => void
+  onEditUser: (userId: string) => void
   onClose: () => void
 }) {
+  const [statusFilter, setStatusFilter] = useState<'active' | 'disabled'>('active')
+  const filteredUsers = users.filter((user) =>
+    statusFilter === 'active' ? user.status === 1 : user.status === 0,
+  )
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4 py-6">
-      <div className="w-full max-w-2xl rounded border border-slate-200 bg-white p-5 shadow-2xl">
+      <div className="w-full max-w-3xl rounded border border-slate-200 bg-white p-5 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wide text-teal-700">
@@ -875,22 +1167,47 @@ function UserPickerModal({
           </button>
         </div>
 
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onCreateUser}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+          >
+            <UserPlus size={15} />
+            Create User
+          </button>
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-semibold text-slate-700" htmlFor="user-status-filter">
+              Status
+            </label>
+            <select
+              id="user-status-filter"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.currentTarget.value as 'active' | 'disabled')}
+              className="h-9 rounded border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-teal-700"
+            >
+              <option value="active">Active</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </div>
+        </div>
+
         <div className="mt-5 overflow-x-auto rounded border border-slate-200">
-          <table className="min-w-[560px] w-full text-left text-sm">
+          <table className="min-w-[720px] w-full text-left text-sm">
             <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
               <tr>
                 <Th>User</Th>
-                <Th>Description</Th>
                 <Th>Strategy</Th>
                 <Th className="text-right">Cash</Th>
                 <Th></Th>
               </tr>
             </thead>
             <tbody>
-              {isLoading && <EmptyRow colSpan={5} text="Loading users." />}
+              {isLoading && <EmptyRow colSpan={4} text="Loading users." />}
               {!isLoading &&
-                users.map((user) => {
+                filteredUsers.map((user) => {
                   const isSelected = user.id === selectedUserId
+                  const isActive = user.status === 1
                   return (
                     <tr key={user.id} className="border-t border-slate-100">
                       <Td>
@@ -901,38 +1218,54 @@ function UserPickerModal({
                           </span>
                         )}
                       </Td>
-                      <Td className="max-w-64 truncate text-slate-600">
-                        {user.description || 'No description'}
-                      </Td>
-                      <Td className="max-w-72 truncate text-slate-600">
-                        {userStrategyName(user)}
+                      <Td className="min-w-64 text-slate-600">
+                        <UserStrategyDetails user={user} />
                       </Td>
                       <Td className="text-right">{money(user.currentBalance)}</Td>
-                      <Td>
-                        <button
-                          className="h-8 rounded bg-teal-700 px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={isSelected}
-                          onClick={() => onSelect(user.id)}
-                        >
-                          Select
-                        </button>
+                      <Td className="min-w-32">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            className={`inline-flex h-8 w-8 items-center justify-center rounded disabled:cursor-not-allowed disabled:opacity-50 ${
+                              isActive
+                                ? 'border border-rose-200 bg-white text-rose-700 hover:border-rose-400'
+                                : 'border border-emerald-200 bg-white text-emerald-700 hover:border-emerald-400'
+                            }`}
+                            disabled={isStatusPending}
+                            onClick={() => onToggleStatus(user)}
+                            type="button"
+                            aria-label={isActive ? `Disable ${user.name}` : `Activate ${user.name}`}
+                            title={isActive ? 'Disable' : 'Activate'}
+                          >
+                            {isActive ? <UserX size={15} /> : <UserCheck size={15} />}
+                          </button>
+                          <button
+                            className="inline-flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-slate-700 hover:border-teal-700 hover:text-teal-700"
+                            onClick={() => onEditUser(user.id)}
+                            type="button"
+                            aria-label={`Edit ${user.name}`}
+                            title="Edit"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            className="h-8 rounded bg-teal-700 px-3 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={isSelected || !isActive}
+                            onClick={() => onSelect(user.id)}
+                            type="button"
+                          >
+                            Select
+                          </button>
+                        </div>
                       </Td>
                     </tr>
                   )
                 })}
-              {!isLoading && !users.length && <EmptyRow colSpan={5} text="No users available." />}
+              {!isLoading && !filteredUsers.length && (
+                <EmptyRow colSpan={4} text={`No ${statusFilter} users available.`} />
+              )}
             </tbody>
           </table>
         </div>
-
-        <button
-          type="button"
-          onClick={onCreateUser}
-          className="mt-4 inline-flex h-10 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800"
-        >
-          <UserPlus size={16} />
-          Create User
-        </button>
       </div>
     </div>
   )

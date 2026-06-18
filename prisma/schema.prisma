@@ -44,6 +44,7 @@ model User {
   startingBalance Decimal  @db.Decimal(18, 2)
   currentBalance  Decimal  @db.Decimal(18, 2)
   strategyId      String?
+  status          Int      @default(1)
   createdAt       DateTime @default(now())
 
   strategy    Strategy?        @relation(fields: [strategyId], references: [id])
@@ -57,10 +58,10 @@ model User {
 model Strategy {
   id                String            @id @default(cuid())
   note              String?           @db.Text
-  maxCoinCount      Int
-  coinSelectionRule CoinSelectionRule
-  buyRule           BuyRule
-  sellRule          SellRule
+  maxCoinCount      Int?
+  coinSelectionRule String?
+  buyRule           String?
+  sellRule          String?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -118,25 +119,4 @@ model UserDailyAsset {
 enum TradeType {
   BUY
   SELL
-}
-
-enum CoinSelectionRule {
-  TOP_MARKET_CAP_100
-  TOP_MARKET_CAP_50
-  HIGHEST_VOLUME
-  HIGHEST_24H_GROWTH
-  HIGHEST_7D_GROWTH
-}
-
-enum BuyRule {
-  HIGHEST_24H_GROWTH
-  HIGHEST_7D_GROWTH
-  HIGHEST_VOLUME
-}
-
-enum SellRule {
-  REBALANCE_DAILY
-  REBALANCE_WEEKLY
-  TAKE_PROFIT
-  STOP_LOSS
 }
