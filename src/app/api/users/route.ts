@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { AvatarValidationError, deleteStoredAvatar, saveAvatarFile } from "@/lib/avatarStorage";
 import { decimalToNumber } from "@/lib/serializers";
 import { hasStrategyInput, normalizeStrategyInput } from "@/lib/strategyInput";
 import { appNow } from "@/config/timezone";
@@ -15,6 +16,8 @@ const userSchema = z.object({
   sellRule: z.string().trim().nullable().optional(),
 });
 
+export const runtime = "nodejs";
+
 export async function GET() {
   const users = await prisma.user.findMany({
     include: {
@@ -28,6 +31,7 @@ export async function GET() {
       id: user.id,
       name: user.name,
       description: user.description,
+      avatar: user.avatar,
       startingBalance: decimalToNumber(user.startingBalance),
       currentBalance: decimalToNumber(user.currentBalance),
       strategyId: user.strategyId,
@@ -47,7 +51,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const parsedPayload = userSchema.safeParse(await request.json());
+  const formData = await request.formData();
+  const parsedPayload = userSchema.safeParse(Object.fromEntries(formData));
   if (!parsedPayload.success) {
     return NextResponse.json(
       { error: "Invalid user data. Check the account and strategy fields." },
@@ -56,25 +61,38 @@ export async function POST(request: Request) {
   }
 
   const payload = parsedPayload.data;
-  const user = await prisma.$transaction(async (tx) => {
-    const strategy = hasStrategyInput(payload)
-      ? await tx.strategy.create({
-          data: normalizeStrategyInput(payload),
-        })
-      : null;
+  let uploadedAvatar: string | null = null;
+  try {
+    uploadedAvatar = await saveAvatarFile(formData.get("avatar"));
+    const user = await prisma.$transaction(async (tx) => {
+      const strategy = hasStrategyInput(payload)
+        ? await tx.strategy.create({
+            data: normalizeStrategyInput(payload),
+          })
+        : null;
 
-    return tx.user.create({
-      data: {
-        name: payload.name,
-        description: payload.description,
-        startingBalance: payload.startingBalance,
-        currentBalance: payload.startingBalance,
-        status: 1,
-        strategyId: strategy?.id ?? null,
-        createdAt: appNow(),
-      },
+      return tx.user.create({
+        data: {
+          name: payload.name,
+          description: payload.description,
+          avatar: uploadedAvatar,
+          startingBalance: payload.startingBalance,
+          currentBalance: payload.startingBalance,
+          status: 1,
+          strategyId: strategy?.id ?? null,
+          createdAt: appNow(),
+        },
+      });
     });
-  });
 
-  return NextResponse.json({ userId: user.id });
+    return NextResponse.json({ userId: user.id });
+  } catch (error) {
+    await deleteStoredAvatar(uploadedAvatar);
+
+    if (error instanceof AvatarValidationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    throw error;
+  }
 }

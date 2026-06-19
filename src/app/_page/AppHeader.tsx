@@ -35,7 +35,16 @@ export function AppHeader({
               onClick={onOpenUserPicker}
               aria-label="Select user"
             >
-              <Users size={16} />
+              {activeUser?.avatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  alt=""
+                  className="h-6 w-6 rounded border border-slate-200 object-cover"
+                  src={activeUser.avatar}
+                />
+              ) : (
+                <Users size={16} />
+              )}
               <span className="max-w-44 truncate">{activeUser?.name ?? 'Select user'}</span>
             </button>
             <button

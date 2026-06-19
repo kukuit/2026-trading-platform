@@ -13,10 +13,8 @@ import { CreateUserModal, EditUserModal, UserPickerModal } from '@/app/_page/Use
 import type { Dashboard, MarketCoin, Performance, PortfolioRow, Tab, Trade, User } from '@/app/_page/types'
 import {
   SELECTED_USER_STORAGE_KEY,
-  createUserPayloadFromForm,
   fetchJson,
   readResponseError,
-  updateUserPayloadFromForm,
 } from '@/app/_page/utils'
 
 export default function AppShell() {
@@ -122,8 +120,7 @@ export default function AppShell() {
     mutationFn: async (form: FormData) => {
       const response = await fetch('/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createUserPayloadFromForm(form)),
+        body: form,
       })
       if (!response.ok) throw new Error(await readResponseError(response))
       return response.json() as Promise<{ userId: string }>
@@ -141,8 +138,7 @@ export default function AppShell() {
     mutationFn: async ({ userId, form }: { userId: string; form: FormData }) => {
       const response = await fetch(`/api/users/${userId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updateUserPayloadFromForm(form)),
+        body: form,
       })
       if (!response.ok) throw new Error(await readResponseError(response))
       return response.json() as Promise<{ userId: string }>

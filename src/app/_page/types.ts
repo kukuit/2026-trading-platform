@@ -13,6 +13,7 @@ export type User = {
   id: string
   name: string
   description: string | null
+  avatar: string | null
   startingBalance: number
   currentBalance: number
   strategyId: string | null

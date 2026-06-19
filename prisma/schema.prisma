@@ -41,6 +41,7 @@ model User {
   id              String   @id @default(cuid())
   name            String
   description     String?
+  avatar          String?
   startingBalance Decimal  @db.Decimal(18, 2)
   currentBalance  Decimal  @db.Decimal(18, 2)
   strategyId      String?

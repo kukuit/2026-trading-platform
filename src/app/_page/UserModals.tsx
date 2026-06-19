@@ -1,7 +1,7 @@
 'use client'
 
-import { FormEvent, useState } from 'react'
-import { Loader2, Pencil, Plus, UserCheck, UserPlus, UserX, X } from 'lucide-react'
+import { FormEvent, useEffect, useState } from 'react'
+import { Camera, Loader2, Pencil, Plus, UserCheck, UserPlus, UserX, X } from 'lucide-react'
 import { money } from '@/lib/serializers'
 import { USD_TO_VND_RATE } from '@/config/currency'
 import type { User } from './types'
@@ -93,6 +93,7 @@ export function CreateUserModal({
         <div className="mt-5 space-y-3">
           <Input name="name" placeholder="Name" required />
           <Input name="description" placeholder="Description" />
+          <AvatarField name="avatar" />
           <StrategyFields />
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
@@ -204,6 +205,7 @@ export function EditUserModal({
             placeholder="Description"
             defaultValue={user.description ?? ''}
           />
+          <AvatarField name="avatar" currentAvatar={user.avatar} fallbackName={user.name} />
           <StrategyFields
             idPrefix="edit-"
             maxCoinCount={user.strategy?.maxCoinCount ?? ''}
@@ -335,17 +337,24 @@ export function UserPickerModal({
                       }`}
                     >
                       <Td>
-                        <div>
-                          <span className="font-semibold text-slate-950">{user.name}</span>
-                          {isSelected && (
-                            <span className="ml-2 rounded bg-teal-100 px-2 py-1 text-xs font-semibold text-teal-700">
-                              Selected
-                            </span>
-                          )}
+                        <div className="flex items-center gap-3">
+                          <UserAvatar user={user} />
+                          <div className="min-w-0">
+                            <div>
+                              <span className="font-semibold text-slate-950">{user.name}</span>
+                              {isSelected && (
+                                <span className="ml-2 rounded bg-teal-100 px-2 py-1 text-xs font-semibold text-teal-700">
+                                  Selected
+                                </span>
+                              )}
+                            </div>
+                            {user.description && (
+                              <p className="mt-1 text-xs leading-5 text-slate-500">
+                                {user.description}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        {user.description && (
-                          <p className="mt-1 text-xs leading-5 text-slate-500">{user.description}</p>
-                        )}
                       </Td>
                       <Td className="min-w-64 text-slate-600">
                         <UserStrategyDetails user={user} />
@@ -398,6 +407,89 @@ export function UserPickerModal({
       </div>
     </div>
   )
+}
+
+function AvatarField({
+  name,
+  currentAvatar,
+  fallbackName = '',
+}: {
+  name: string
+  currentAvatar?: string | null
+  fallbackName?: string
+}) {
+  const [preview, setPreview] = useState(currentAvatar ?? '')
+  const [previewObjectUrl, setPreviewObjectUrl] = useState('')
+
+  useEffect(() => {
+    return () => {
+      if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl)
+    }
+  }, [previewObjectUrl])
+
+  return (
+    <div className="flex items-center gap-3 rounded border border-slate-200 bg-slate-50 p-3">
+      <div className="h-16 w-16 shrink-0 overflow-hidden rounded border border-slate-200 bg-white">
+        {preview ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img alt="" className="h-full w-full object-cover" src={preview} />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-slate-500">
+            {initials(fallbackName) || <Camera size={18} />}
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Avatar
+        </label>
+        <Input
+          accept="image/png,image/jpeg"
+          className="pt-1.5"
+          name={name}
+          type="file"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0]
+            if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl)
+            if (!file) {
+              setPreviewObjectUrl('')
+              setPreview(currentAvatar ?? '')
+              return
+            }
+
+            const nextPreview = URL.createObjectURL(file)
+            setPreviewObjectUrl(nextPreview)
+            setPreview(nextPreview)
+          }}
+        />
+        <p className="mt-1 text-xs text-slate-500">PNG or JPG, 1:1 ratio, max 2MB.</p>
+      </div>
+    </div>
+  )
+}
+
+function UserAvatar({ user }: { user: User }) {
+  return (
+    <div className="h-10 w-10 shrink-0 overflow-hidden rounded border border-slate-200 bg-slate-100">
+      {user.avatar ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img alt="" className="h-full w-full object-cover" src={user.avatar} />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-xs font-semibold text-slate-500">
+          {initials(user.name)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function initials(value: string) {
+  return value
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('')
 }
 
 function StrategyFields({

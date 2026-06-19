@@ -27,6 +27,7 @@ export async function GET(
       id: user.id,
       name: user.name,
       description: user.description,
+      avatar: user.avatar,
       startingBalance,
       currentBalance,
       strategyId: user.strategyId,
