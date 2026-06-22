@@ -1,3 +1,4 @@
+import { HandCoins } from 'lucide-react'
 import { money, preciseMoney, quantity } from '@/lib/serializers'
 import type { PortfolioRow } from './types'
 import { pct, toneClass } from './utils'
@@ -15,6 +16,7 @@ export function PortfolioTable({
       <table className="min-w-[940px] w-full text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
           <tr>
+            <Th className="w-12 text-center">No.</Th>
             <Th>Coin</Th>
             <Th className="text-right">Quantity</Th>
             <Th className="text-right">Avg Price</Th>
@@ -26,8 +28,9 @@ export function PortfolioTable({
           </tr>
         </thead>
         <tbody>
-          {portfolio.map((row) => (
+          {portfolio.map((row, index) => (
             <tr key={row.id} className="border-t border-slate-100">
+              <Td className="w-12 text-center text-slate-500">{index + 1}</Td>
               <Td>
                 <span className="font-semibold">{row.symbol}</span>
                 <span className="ml-2 text-slate-500">{row.name}</span>
@@ -44,15 +47,17 @@ export function PortfolioTable({
               </Td>
               <Td>
                 <button
-                  className="h-8 rounded bg-orange-500 px-3 text-xs font-semibold text-white"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded bg-orange-500 text-white"
                   onClick={() => onSell(row)}
+                  title="Sell"
+                  aria-label={`Sell ${row.symbol}`}
                 >
-                  Sell
+                  <HandCoins size={16} />
                 </button>
               </Td>
             </tr>
           ))}
-          {!portfolio.length && <EmptyRow colSpan={8} text="No holdings yet." />}
+          {!portfolio.length && <EmptyRow colSpan={9} text="No holdings yet." />}
         </tbody>
       </table>
     </div>

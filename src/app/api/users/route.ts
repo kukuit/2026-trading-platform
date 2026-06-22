@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { AvatarValidationError, deleteStoredAvatar, saveAvatarFile } from "@/lib/avatarStorage";
+import { getAssetValue } from "@/lib/portfolio";
 import { decimalToNumber } from "@/lib/serializers";
 import { hasStrategyInput, normalizeStrategyInput } from "@/lib/strategyInput";
 import { appNow } from "@/config/timezone";
@@ -25,28 +26,42 @@ export async function GET() {
     },
     orderBy: { createdAt: "asc" },
   });
+  const usersWithTotals = await Promise.all(
+    users.map(async (user) => {
+      const startingBalance = decimalToNumber(user.startingBalance);
+      const currentBalance = decimalToNumber(user.currentBalance);
+      const assetValue = await getAssetValue(user.id);
+      const totalValue = currentBalance + assetValue;
+      const pnl = totalValue - startingBalance;
+      const pnlPct = startingBalance > 0 ? (pnl / startingBalance) * 100 : 0;
+
+      return {
+        id: user.id,
+        name: user.name,
+        description: user.description,
+        avatar: user.avatar,
+        startingBalance,
+        currentBalance,
+        pnl,
+        pnlPct,
+        strategyId: user.strategyId,
+        status: user.status,
+        strategy: user.strategy
+          ? {
+              id: user.strategy.id,
+              note: user.strategy.note,
+              maxCoinCount: user.strategy.maxCoinCount,
+              coinSelectionRule: user.strategy.coinSelectionRule,
+              buyRule: user.strategy.buyRule,
+              sellRule: user.strategy.sellRule,
+            }
+          : null,
+      };
+    }),
+  );
 
   return NextResponse.json({
-    users: users.map((user) => ({
-      id: user.id,
-      name: user.name,
-      description: user.description,
-      avatar: user.avatar,
-      startingBalance: decimalToNumber(user.startingBalance),
-      currentBalance: decimalToNumber(user.currentBalance),
-      strategyId: user.strategyId,
-      status: user.status,
-      strategy: user.strategy
-        ? {
-            id: user.strategy.id,
-            note: user.strategy.note,
-            maxCoinCount: user.strategy.maxCoinCount,
-            coinSelectionRule: user.strategy.coinSelectionRule,
-            buyRule: user.strategy.buyRule,
-            sellRule: user.strategy.sellRule,
-          }
-        : null,
-    })),
+    users: usersWithTotals,
   });
 }
 

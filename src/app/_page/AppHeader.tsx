@@ -1,3 +1,6 @@
+'use client'
+
+import { useEffect, useRef, useState } from 'react'
 import { RefreshCw, UserPlus, Users } from 'lucide-react'
 import { money } from '@/lib/serializers'
 import type { Dashboard, User } from './types'
@@ -17,11 +20,71 @@ export function AppHeader({
   onOpenCreateUser: () => void
   onRefresh: () => void
 }) {
+  const [isCompact, setIsCompact] = useState(false)
+  const headerRef = useRef<HTMLElement | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const updateCompactState = () => {
+      if (animationFrameRef.current) return
+
+      animationFrameRef.current = window.requestAnimationFrame(() => {
+        setIsCompact((current) => {
+          const scrollTop = window.scrollY
+          if (current) return scrollTop > 0
+          return scrollTop > 16
+        })
+        animationFrameRef.current = null
+      })
+    }
+
+    updateCompactState()
+    window.addEventListener('scroll', updateCompactState, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', updateCompactState)
+      if (animationFrameRef.current) {
+        window.cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+
+    const updateHeaderHeight = () => {
+      document.documentElement.style.setProperty('--app-header-height', `${header.offsetHeight}px`)
+    }
+
+    updateHeaderHeight()
+    const resizeObserver = new ResizeObserver(updateHeaderHeight)
+    resizeObserver.observe(header)
+    window.addEventListener('resize', updateHeaderHeight)
+
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', updateHeaderHeight)
+    }
+  }, [])
+
   return (
-    <header className="border-b border-slate-200 bg-white">
-      <div className="mx-auto flex max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur"
+    >
+      <div
+        className={`mx-auto flex max-w-7xl flex-col px-4 transition-all duration-200 ease-out sm:px-6 lg:px-8 ${
+          isCompact ? 'gap-3 py-3' : 'gap-5 py-5'
+        }`}
+      >
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
+          <div
+            className={`overflow-hidden transition-all duration-200 ease-out ${
+              isCompact ? 'pointer-events-none max-h-0 opacity-0' : 'max-h-24 opacity-100'
+            }`}
+            aria-hidden={isCompact}
+          >
             <p className="text-sm font-semibold uppercase tracking-wide text-teal-700">
               Crypto Paper Trading MVP
             </p>
@@ -29,7 +92,7 @@ export function AppHeader({
               Trading desk
             </h1>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center lg:ml-auto">
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
               onClick={onOpenUserPicker}
@@ -65,10 +128,23 @@ export function AppHeader({
         </div>
 
         <section className="grid gap-3 md:grid-cols-4">
-          <Metric label="Cash" value={money(dashboard?.totals.currentBalance ?? 0)} />
-          <Metric label="Assets" value={money(dashboard?.totals.assetValue ?? 0)} />
-          <Metric label="Total" value={money(dashboard?.totals.totalValue ?? 0)} />
           <Metric
+            hideLabel={isCompact}
+            label="Cash"
+            value={money(dashboard?.totals.currentBalance ?? 0)}
+          />
+          <Metric
+            hideLabel={isCompact}
+            label="Assets"
+            value={money(dashboard?.totals.assetValue ?? 0)}
+          />
+          <Metric
+            hideLabel={isCompact}
+            label="Total"
+            value={money(dashboard?.totals.totalValue ?? 0)}
+          />
+          <Metric
+            hideLabel={isCompact}
             label="PnL"
             value={`${money(dashboard?.totals.pnl ?? 0)} / ${pct(dashboard?.totals.pnlPct ?? 0)}`}
             positive={(dashboard?.totals.pnl ?? 0) >= 0}

@@ -8,6 +8,7 @@ export function TradeHistory({ trades }: { trades: Trade[] }) {
       <table className="min-w-[780px] w-full text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
           <tr>
+            <Th className="w-12 text-center">No.</Th>
             <Th>Date</Th>
             <Th>Coin</Th>
             <Th>Type</Th>
@@ -17,8 +18,9 @@ export function TradeHistory({ trades }: { trades: Trade[] }) {
           </tr>
         </thead>
         <tbody>
-          {trades.map((trade) => (
+          {trades.map((trade, index) => (
             <tr key={trade.id} className="border-t border-slate-100">
+              <Td className="w-12 text-center text-slate-500">{index + 1}</Td>
               <Td>{new Date(trade.date).toLocaleString('vi-VN')}</Td>
               <Td>
                 <span className="font-semibold">{trade.symbol}</span>
@@ -40,7 +42,7 @@ export function TradeHistory({ trades }: { trades: Trade[] }) {
               <Td className="text-right">{money(trade.totalAmount)}</Td>
             </tr>
           ))}
-          {!trades.length && <EmptyRow colSpan={6} text="No trades yet." />}
+          {!trades.length && <EmptyRow colSpan={7} text="No trades yet." />}
         </tbody>
       </table>
     </div>

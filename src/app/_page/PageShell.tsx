@@ -21,6 +21,7 @@ export default function AppShell() {
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<Tab>('market')
   const [selectedUserId, setSelectedUserId] = useState('')
+  const [selectedMarketCoinId, setSelectedMarketCoinId] = useState<number | null>(null)
   const [tradeCoinId, setTradeCoinId] = useState<number | null>(null)
   const [sellHolding, setSellHolding] = useState<PortfolioRow | null>(null)
   const [tradeMode, setTradeMode] = useState<'BUY' | 'SELL'>('BUY')
@@ -320,6 +321,7 @@ export default function AppShell() {
   }
 
   const openTradeModal = (coinId: number) => {
+    setSelectedMarketCoinId(coinId)
     setTradeMode('BUY')
     setTradeCoinId(coinId)
     setSellHolding(null)
@@ -329,6 +331,7 @@ export default function AppShell() {
   }
 
   const openSellModal = (holding: PortfolioRow) => {
+    setSelectedMarketCoinId(holding.coinId)
     setTradeMode('SELL')
     setSellHolding(holding)
     setTradeCoinId(null)
@@ -354,11 +357,15 @@ export default function AppShell() {
           {activeTab === 'market' && (
             <MarketTable
               market={market}
+              portfolio={portfolio}
+              selectedCoinId={selectedMarketCoinId}
               isLoading={marketQuery.isLoading}
               isFetching={marketQuery.isFetching}
               isReloadingMarketCap={marketCapMutation.isPending}
               onReloadPrice={() => marketQuery.refetch()}
               onReloadMarketCap={() => marketCapMutation.mutate()}
+              onSelectCoin={setSelectedMarketCoinId}
+              onSell={openSellModal}
               onTrade={openTradeModal}
             />
           )}

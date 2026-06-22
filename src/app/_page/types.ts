@@ -16,6 +16,8 @@ export type User = {
   avatar: string | null
   startingBalance: number
   currentBalance: number
+  pnl: number
+  pnlPct: number
   strategyId: string | null
   status: number
   strategy: Strategy | null

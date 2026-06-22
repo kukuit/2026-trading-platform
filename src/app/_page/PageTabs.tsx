@@ -1,9 +1,18 @@
 import type { Tab } from './types'
 import { tabs } from './types'
 
-export function PageTabs({ activeTab, onChange }: { activeTab: Tab; onChange: (tab: Tab) => void }) {
+export function PageTabs({
+  activeTab,
+  onChange,
+}: {
+  activeTab: Tab
+  onChange: (tab: Tab) => void
+}) {
   return (
-    <nav className="flex gap-2 overflow-x-auto border-b border-slate-200">
+    <nav
+      className="sticky z-20 flex gap-2 overflow-x-auto border-b border-slate-200 bg-[#f4f6f8]"
+      style={{ top: 'var(--app-header-height, 0px)' }}
+    >
       {tabs.map((tab) => {
         const Icon = tab.icon
         return (

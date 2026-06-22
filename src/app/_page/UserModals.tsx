@@ -5,7 +5,7 @@ import { Camera, Loader2, Pencil, Plus, UserCheck, UserPlus, UserX, X } from 'lu
 import { money } from '@/lib/serializers'
 import { USD_TO_VND_RATE } from '@/config/currency'
 import type { User } from './types'
-import { DEFAULT_STARTING_BALANCE_VND, formatUsdInput } from './utils'
+import { DEFAULT_STARTING_BALANCE_VND, formatUsdInput, pct } from './utils'
 import { EmptyRow, Input, Td, Th } from './ui'
 import { UserStrategyDetails } from './UserStrategyDetails'
 
@@ -266,7 +266,7 @@ export function UserPickerModal({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 px-4 py-6">
-      <div className="w-full max-w-3xl rounded border border-slate-200 bg-white p-5 shadow-2xl">
+      <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-3xl flex-col rounded border border-slate-200 bg-white p-5 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wide text-teal-700">
@@ -311,13 +311,13 @@ export function UserPickerModal({
           </div>
         </div>
 
-        <div className="mt-5 overflow-x-auto rounded border border-slate-200">
-          <table className="min-w-[720px] w-full text-left text-sm">
-            <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
+        <div className="mt-5 min-h-0 flex-1 overflow-y-auto overflow-x-hidden rounded border border-slate-200">
+          <table className="w-full text-left text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
               <tr>
                 <Th>User</Th>
                 <Th>Strategy</Th>
-                <Th className="text-right">Cash</Th>
+                <Th className="text-right">PnL</Th>
                 <Th></Th>
               </tr>
             </thead>
@@ -359,7 +359,14 @@ export function UserPickerModal({
                       <Td className="min-w-64 text-slate-600">
                         <UserStrategyDetails user={user} />
                       </Td>
-                      <Td className="text-right">{money(user.currentBalance)}</Td>
+                      <Td
+                        className={`text-right font-semibold ${
+                          user.pnl >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                        }`}
+                      >
+                        <div>{money(user.pnl)}</div>
+                        <div className="text-xs">{pct(user.pnlPct)}</div>
+                      </Td>
                       <Td className="min-w-32">
                         <div className="flex items-center justify-end gap-2">
                           <button

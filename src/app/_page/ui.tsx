@@ -2,20 +2,37 @@ import type { InputHTMLAttributes, ReactNode } from 'react'
 import type { SortDirection } from './types'
 
 export function Metric({
+  hideLabel = false,
   label,
   value,
   positive,
 }: {
+  hideLabel?: boolean
   label: string
   value: string
   positive?: boolean
 }) {
   return (
-    <div className="rounded border border-slate-200 bg-white p-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+    <div
+      className={`rounded border border-slate-200 bg-white transition-all duration-200 ease-out ${
+        hideLabel ? 'p-3' : 'p-4'
+      }`}
+    >
       <p
-        className={`mt-2 text-xl font-semibold ${
-          positive === undefined ? 'text-slate-950' : positive ? 'text-emerald-700' : 'text-rose-700'
+        className={`overflow-hidden text-xs font-semibold uppercase tracking-wide text-slate-500 transition-all duration-200 ease-out ${
+          hideLabel ? 'max-h-0 opacity-0' : 'max-h-5 opacity-100'
+        }`}
+        aria-hidden={hideLabel}
+      >
+        {label}
+      </p>
+      <p
+        className={`${hideLabel ? '' : 'mt-2'} text-xl font-semibold ${
+          positive === undefined
+            ? 'text-slate-950'
+            : positive
+              ? 'text-emerald-700'
+              : 'text-rose-700'
         }`}
       >
         {value}
