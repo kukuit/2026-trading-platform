@@ -121,3 +121,290 @@ enum TradeType {
   BUY
   SELL
 }
+
+enum FootballCollectorMode {
+  PRODUCTION
+  TEST
+}
+
+enum FootballOddsSource {
+  LIVE
+}
+
+enum FootballTrackingStatus {
+  SCHEDULED
+  RECORDING
+  PAUSED
+  INTERRUPTED
+  COMPLETED
+  CANCELLED
+}
+
+enum FootballResultStatus {
+  RESULT_PENDING
+  RESULT_COMPLETE
+  RESULT_MISSING
+  RESULT_MANUAL
+}
+
+enum FootballSlotStatus {
+  PENDING
+  SAVED
+  MISSING
+  MISSED
+}
+
+model FootballLeague {
+  id          String   @id @default(cuid())
+  key         String   @unique @db.VarChar(32)
+  apiLeagueId Int      @unique
+  name        String   @db.VarChar(191)
+  shortName   String   @db.VarChar(64)
+  country     String   @db.VarChar(100)
+  season      Int
+  isEnabled   Boolean  @default(true)
+  verifiedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  fixtures FootballFixture[]
+
+  @@index([isEnabled, apiLeagueId])
+}
+
+model FootballFixture {
+  id                String                  @id @default(cuid())
+  providerFixtureId Int                     @unique
+  providerLeagueId  Int
+  season            Int
+  homeTeamId        Int?
+  awayTeamId        Int?
+  homeTeamName      String                  @db.VarChar(191)
+  awayTeamName      String                  @db.VarChar(191)
+  homeTeamLogo      String?                 @db.VarChar(512)
+  awayTeamLogo      String?                 @db.VarChar(512)
+  kickoffAt         DateTime
+  status            String                  @default("NS") @db.VarChar(16)
+  elapsedMinute     Int?
+  elapsedExtraTime  Int      @default(0)
+  homeScore         Int?
+  awayScore         Int?
+  homeScoreHt       Int?
+  awayScoreHt       Int?
+  homeScoreFt       Int?
+  awayScoreFt       Int?
+  resultStatus      FootballResultStatus @default(RESULT_PENDING)
+  resultSource      String?               @db.VarChar(32)
+  resultUpdatedAt   DateTime?
+  isTestFixture     Boolean                 @default(false)
+  leagueCatalogId   String?
+  lastSyncedAt      DateTime?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  oddsSnapshots     FootballOddsSnapshot[]
+  league            FootballLeague?       @relation(fields: [leagueCatalogId], references: [id], onDelete: SetNull)
+  liveTracking      FootballLiveTracking?
+
+  @@index([leagueCatalogId, kickoffAt])
+  @@index([providerLeagueId, kickoffAt])
+  @@index([status, kickoffAt])
+  @@index([isTestFixture, kickoffAt])
+}
+
+model FootballLiveTracking {
+  id              String                 @id @default(cuid())
+  fixtureId       String                 @unique
+  status          FootballTrackingStatus @default(SCHEDULED)
+  isEnabled       Boolean                @default(true)
+  scheduledAt     DateTime               @default(now())
+  startedAt       DateTime?
+  lastPolledAt    DateTime?
+  lastSavedMinute Int?
+  completedAt     DateTime?
+  lastError       String?                @db.Text
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  fixture FootballFixture       @relation(fields: [fixtureId], references: [id], onDelete: Cascade)
+  odds    FootballOddsSnapshot[]
+  slots   FootballTrackingSlot[]
+  logs    FootballCollectorLog[]
+
+  @@index([isEnabled, status, scheduledAt])
+}
+
+model FootballTrackingSlot {
+  id              String            @id @default(cuid())
+  trackingId      String
+  slotKey         String            @db.VarChar(32)
+  targetMinute    Int?
+  period          String?           @db.VarChar(16)
+  status          FootballSlotStatus @default(PENDING)
+  actualMinute    Int?
+  capturedAt      DateTime?
+  error           String?           @db.Text
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  tracking        FootballLiveTracking @relation(fields: [trackingId], references: [id], onDelete: Cascade)
+
+  @@unique([trackingId, slotKey])
+  @@index([trackingId, status, targetMinute])
+}
+
+model FootballOddsSnapshot {
+  id                String             @id @default(cuid())
+  fixtureId         String
+  capturedAt        DateTime           @default(now())
+  providerUpdatedAt DateTime?
+  sourceHash        String             @db.Char(64)
+  sourceType        FootballOddsSource @default(LIVE)
+  isTest            Boolean            @default(false)
+  trackingId        String?
+  slotKey           String?            @db.VarChar(32)
+  targetMinute      Int?
+  actualMinute      Int?
+  period            String?            @db.VarChar(16)
+  homeScore         Int?
+  awayScore         Int?
+  fixtureStatus     String?            @db.VarChar(16)
+  dataStatus        String?            @db.VarChar(24)
+  bookmakerId       Int?
+  bookmakerName     String?            @db.VarChar(191)
+  ahHtLine          Decimal?           @db.Decimal(10, 4)
+  ahHtHomePrice     Decimal?           @db.Decimal(12, 6)
+  ahHtAwayPrice     Decimal?           @db.Decimal(12, 6)
+  ahFtLine          Decimal?           @db.Decimal(10, 4)
+  ahFtHomePrice     Decimal?           @db.Decimal(12, 6)
+  ahFtAwayPrice     Decimal?           @db.Decimal(12, 6)
+  ouHtLine          Decimal?           @db.Decimal(10, 4)
+  ouHtOverPrice     Decimal?           @db.Decimal(12, 6)
+  ouHtUnderPrice    Decimal?           @db.Decimal(12, 6)
+  ouFtLine          Decimal?           @db.Decimal(10, 4)
+  ouFtOverPrice     Decimal?           @db.Decimal(12, 6)
+  ouFtUnderPrice    Decimal?           @db.Decimal(12, 6)
+  missingMarkets    Json?
+  rawJson           Json
+  createdAt         DateTime           @default(now())
+  fixture           FootballFixture    @relation(fields: [fixtureId], references: [id], onDelete: Cascade)
+  tracking          FootballLiveTracking? @relation(fields: [trackingId], references: [id], onDelete: SetNull)
+  values            FootballOddsValue[]
+
+  @@unique([trackingId, slotKey])
+  @@index([trackingId, capturedAt])
+  @@index([fixtureId, capturedAt])
+  @@index([isTest, capturedAt])
+  @@index([sourceHash])
+  @@index([capturedAt])
+}
+
+model FootballOddsValue {
+  id            String               @id @default(cuid())
+  snapshotId    String
+  providerBetId Int
+  betName       String               @db.VarChar(191)
+  bookmakerId   Int?
+  bookmakerName String?              @db.VarChar(191)
+  selectionName String               @db.VarChar(191)
+  oddValue      String               @db.VarChar(64)
+  oddNumeric    Decimal?             @db.Decimal(12, 6)
+  main          Boolean?
+  suspended     Boolean?
+  blocked       Boolean?
+  stopped       Boolean?
+  finished      Boolean?
+  extraData     Json?
+  snapshot      FootballOddsSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId])
+  @@index([providerBetId, selectionName])
+}
+
+model FootballCollectorJob {
+  id                      String                @id @default(cuid())
+  jobName                 String                @unique @db.VarChar(64)
+  mode                    FootballCollectorMode @default(PRODUCTION)
+  enabled                 Boolean               @default(false)
+  leagueId                Int                   @default(39)
+  season                  Int
+  fixtureId               Int?
+  pollingIntervalSeconds Int                   @default(300)
+  dailyTotalLimit         Int                   @default(7500)
+  dailyOddsBudget         Int                   @default(6000)
+  dailyReservedBudget     Int                   @default(1500)
+  lastRunAt               DateTime?
+  nextRunAt               DateTime?
+  lastSuccessAt           DateTime?
+  lastFixtureSyncAt       DateTime?
+  lastError               String?               @db.Text
+  status                  String                @default("IDLE") @db.VarChar(32)
+  lockOwner               String?               @db.VarChar(191)
+  lockExpiresAt           DateTime?
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+
+  @@index([enabled, status, nextRunAt])
+  @@index([lockExpiresAt])
+}
+
+model FootballApiRequestLog {
+  id                  String   @id @default(cuid())
+  endpoint            String   @db.VarChar(191)
+  requestType         String   @db.VarChar(16)
+  fixtureId           Int?
+  requestedAt         DateTime @default(now())
+  statusCode          Int?
+  success             Boolean  @default(false)
+  durationMs          Int
+  dailyQuotaLimit     Int?
+  dailyQuotaRemaining Int?
+  minuteQuotaLimit    Int?
+  minuteQuotaRemaining Int?
+  errorMessage        String?  @db.Text
+
+  @@index([requestedAt])
+  @@index([fixtureId, requestedAt])
+  @@index([success, requestedAt])
+}
+
+model FootballQuotaDay {
+  utcDate          DateTime @id @db.Date
+  totalUsed        Int      @default(0)
+  oddsUsed         Int      @default(0)
+  reservedUsed     Int      @default(0)
+  providerRemaining Int?
+  providerDailyLimit Int?
+  providerMinuteRemaining Int?
+  providerMinuteLimit Int?
+  providerReportedAt DateTime?
+  providerMinuteWindowStart DateTime?
+  providerMinuteReserved Int      @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+model FootballCollectorSettings {
+  id                        String   @id @default("default") @db.VarChar(32)
+  isEnabled                 Boolean  @default(true)
+  oddsIntervalMinutes       Int      @default(5)
+  fixtureSyncIntervalHours  Int      @default(6)
+  statusCheckIntervalSeconds Int     @default(60)
+  preferredBookmakerId      Int?
+  heartbeatAt               DateTime?
+  workerId                  String?  @db.VarChar(191)
+  lastError                 String?  @db.Text
+  updatedAt                 DateTime @updatedAt
+}
+
+model FootballCollectorLog {
+  id         String                @id @default(cuid())
+  trackingId String?
+  level      String                @db.VarChar(16)
+  action     String                @db.VarChar(64)
+  message    String                @db.VarChar(1000)
+  details    Json?
+  createdAt  DateTime              @default(now())
+  tracking   FootballLiveTracking? @relation(fields: [trackingId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([trackingId, createdAt])
+}

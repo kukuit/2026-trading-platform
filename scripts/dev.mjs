@@ -14,7 +14,7 @@ const env = {
 // check during `next dev`, which can stall or fail on locked-down networks.
 delete env.DEBUG
 
-const child = spawn(process.execPath, [nextBin, 'dev', ...process.argv.slice(2)], {
+const child = spawn(process.execPath, [nextBin, 'dev', '-p', '8001', ...process.argv.slice(2)], {
   cwd: root,
   env,
   stdio: 'inherit',

@@ -15,6 +15,7 @@
 
 # production
 /build
+/.football-worker-build/
 
 # misc
 .DS_Store

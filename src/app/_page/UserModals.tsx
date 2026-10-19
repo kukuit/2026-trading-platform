@@ -360,12 +360,12 @@ export function UserPickerModal({
                         <UserStrategyDetails user={user} />
                       </Td>
                       <Td
-                        className={`text-right font-semibold ${
+                        className={`text-right ${
                           user.pnl >= 0 ? 'text-emerald-700' : 'text-rose-700'
                         }`}
                       >
-                        <div>{money(user.pnl)}</div>
-                        <div className="text-xs">{pct(user.pnlPct)}</div>
+                        <div className="text-base font-bold">{pct(user.pnlPct)}</div>
+                        <div className="text-xs font-semibold">{money(user.pnl)}</div>
                       </Td>
                       <Td className="min-w-32">
                         <div className="flex items-center justify-end gap-2">

@@ -59,3 +59,180 @@ button:disabled {
   background: #9aa6b2;
   border-radius: 999px;
 }
+
+.football-theme-dark {
+  color-scheme: dark;
+  background-color: #0b1220;
+  color: #e2e8f0;
+}
+
+.football-theme-dark .bg-white,
+.football-theme-dark .bg-white\/95 {
+  background-color: #111c2e;
+}
+
+.football-theme-dark .bg-slate-50,
+.football-theme-dark .bg-slate-50\/70 {
+  background-color: #0f172a;
+}
+
+.football-theme-dark .bg-slate-100 {
+  background-color: #1e293b;
+}
+
+.football-theme-dark .bg-slate-900 {
+  background-color: #334155;
+}
+
+.football-theme-dark .bg-teal-50,
+.football-theme-dark .bg-teal-50\/50 {
+  background-color: #042f2e;
+}
+
+.football-theme-dark .bg-emerald-50 {
+  background-color: #052e24;
+}
+
+.football-theme-dark .bg-rose-50 {
+  background-color: #3b1018;
+}
+
+.football-theme-dark .bg-amber-50 {
+  background-color: #3b2508;
+}
+
+.football-theme-dark .bg-sky-50 {
+  background-color: #082f49;
+}
+
+.football-theme-dark .text-white {
+  color: #f8fafc;
+}
+
+.football-theme-dark .text-slate-950,
+.football-theme-dark .text-slate-900 {
+  color: #f8fafc;
+}
+
+.football-theme-dark .text-slate-800 {
+  color: #e2e8f0;
+}
+
+.football-theme-dark .text-slate-700,
+.football-theme-dark .text-slate-600 {
+  color: #cbd5e1;
+}
+
+.football-theme-dark .text-slate-500 {
+  color: #94a3b8;
+}
+
+.football-theme-dark .text-slate-400,
+.football-theme-dark .text-slate-300 {
+  color: #64748b;
+}
+
+.football-theme-dark .text-teal-900,
+.football-theme-dark .text-teal-800,
+.football-theme-dark .text-teal-700 {
+  color: #5eead4;
+}
+
+.football-theme-dark .text-emerald-800,
+.football-theme-dark .text-emerald-700 {
+  color: #6ee7b7;
+}
+
+.football-theme-dark .text-rose-700 {
+  color: #fda4af;
+}
+
+.football-theme-dark .text-amber-900,
+.football-theme-dark .text-amber-800,
+.football-theme-dark .text-amber-700,
+.football-theme-dark .text-amber-600 {
+  color: #fcd34d;
+}
+
+.football-theme-dark .text-sky-700 {
+  color: #7dd3fc;
+}
+
+.football-theme-dark .border-slate-300 {
+  border-color: #475569;
+}
+
+.football-theme-dark .border-slate-200 {
+  border-color: #334155;
+}
+
+.football-theme-dark .border-slate-100 {
+  border-color: #293548;
+}
+
+.football-theme-dark .border-teal-100,
+.football-theme-dark .border-teal-200,
+.football-theme-dark .border-teal-300,
+.football-theme-dark .border-teal-600,
+.football-theme-dark .border-teal-700 {
+  border-color: #0f766e;
+}
+
+.football-theme-dark .border-emerald-200 {
+  border-color: #047857;
+}
+
+.football-theme-dark .border-rose-200 {
+  border-color: #9f1239;
+}
+
+.football-theme-dark .border-amber-200 {
+  border-color: #a16207;
+}
+
+.football-theme-dark .border-sky-200 {
+  border-color: #0369a1;
+}
+
+.football-theme-dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #293548;
+}
+
+.football-theme-dark .hover\:bg-slate-50:hover,
+.football-theme-dark .hover\:bg-slate-50\/70:hover {
+  background-color: #1e293b;
+}
+
+.football-theme-dark .hover\:text-slate-800:hover {
+  color: #e2e8f0;
+}
+
+.football-theme-dark .hover\:text-teal-800:hover {
+  color: #5eead4;
+}
+
+.football-theme-dark input,
+.football-theme-dark select,
+.football-theme-dark textarea {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  border-color: #475569;
+}
+
+.football-theme-dark option {
+  background-color: #111c2e;
+  color: #e2e8f0;
+}
+
+.football-theme-dark .recharts-cartesian-grid line {
+  stroke: #334155;
+}
+
+.football-theme-dark .recharts-cartesian-axis-tick text {
+  fill: #94a3b8;
+}
+
+.football-theme-dark .recharts-default-tooltip {
+  background-color: #111c2e !important;
+  border-color: #334155 !important;
+}
