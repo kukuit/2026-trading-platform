@@ -3,6 +3,10 @@ import { Prisma } from "@prisma/client";
 import { FOOTBALL_DEFAULTS, footballDateKey, getUtcDate, shiftFootballDate } from "./config";
 import { FOOTBALL_LEAGUES, footballJobName, isSupportedFootballLeague } from "./leagues";
 import { apiFootballClient } from "./api-client";
+import { displayHandicapLines, parseStructuredLiveMarkets, PREMATCH_SLOT_KEY } from "./markets";
+import { compactSnapshotHash } from "./snapshot-hash";
+import { emptyFixtureStatistics, fetchFixtureStatistics } from "./statistics";
+import { settleFixtureOdds, type SnapshotSettlement } from "./settlement";
 import {
   normalizeLiveOdds,
   providerFixture,
@@ -12,6 +16,12 @@ import {
 
 const FINISHED_STATUSES = ["FT", "AET", "PEN", "CANC", "PST", "ABD", "AWD", "WO"];
 const LIVE_STATUSES = ["1H", "HT", "2H", "ET", "BT", "P", "INT", "LIVE", "SUSP"];
+const VISIBLE_ODDS_HISTORY: Prisma.FootballOddsSnapshotWhereInput = {
+  OR: [
+    { sourceType: "LIVE" },
+    { sourceType: "PREMATCH", slotKey: PREMATCH_SLOT_KEY },
+  ],
+};
 
 export async function getCollectorJobs() {
   const catalogRows = await Promise.all(FOOTBALL_LEAGUES.map((league) =>
@@ -233,26 +243,108 @@ export async function listFixtures(filter: string, page: number) {
   };
 }
 
+const fixtureHistoryBaseSelect = {
+  id: true,
+  capturedAt: true,
+  isTest: true,
+  sourceType: true,
+  slotKey: true,
+  targetMinute: true,
+  actualMinute: true,
+  period: true,
+  homeScore: true,
+  awayScore: true,
+  fixtureStatus: true,
+  dataStatus: true,
+  ahHtLine: true,
+  ahHtHomePrice: true,
+  ahHtAwayPrice: true,
+  ahFtLine: true,
+  ahFtHomePrice: true,
+  ahFtAwayPrice: true,
+  ouHtLine: true,
+  ouHtOverPrice: true,
+  ouHtUnderPrice: true,
+  ouFtLine: true,
+  ouFtOverPrice: true,
+  ouFtUnderPrice: true,
+} satisfies Prisma.FootballOddsSnapshotSelect;
+
+const fixtureHistoryWithCornersSelect = {
+  ...fixtureHistoryBaseSelect,
+  settlementData: true,
+  homeCornerKicks: true,
+  awayCornerKicks: true,
+  cornerAhHtLine: true,
+  cornerAhHtHomePrice: true,
+  cornerAhHtAwayPrice: true,
+  cornerOuHtLine: true,
+  cornerOuHtOverPrice: true,
+  cornerOuHtUnderPrice: true,
+  cornerAhFtLine: true,
+  cornerAhFtHomePrice: true,
+  cornerAhFtAwayPrice: true,
+  cornerOuFtLine: true,
+  cornerOuFtOverPrice: true,
+  cornerOuFtUnderPrice: true,
+} satisfies Prisma.FootballOddsSnapshotSelect;
+
+type FixtureHistorySnapshot = Prisma.FootballOddsSnapshotGetPayload<{
+  select: typeof fixtureHistoryWithCornersSelect;
+}>;
+
 export async function getFixtureDetails(id: string) {
-  const fixture = await prisma.footballFixture.findUnique({
-    where: { id },
-    include: {
-      oddsSnapshots: {
-        orderBy: { capturedAt: "desc" },
-        take: 100,
-        include: { values: { orderBy: [{ betName: "asc" }, { bookmakerName: "asc" }] } },
-      },
-    },
-  });
+  const fixture = await prisma.footballFixture.findUnique({ where: { id } });
   if (!fixture) return null;
+
+  await settleFixtureOdds(id);
+
+  let snapshots: FixtureHistorySnapshot[];
+  try {
+    snapshots = await prisma.footballOddsSnapshot.findMany({
+      where: { fixtureId: id, ...VISIBLE_ODDS_HISTORY },
+      orderBy: { capturedAt: "desc" },
+      take: 100,
+      select: fixtureHistoryWithCornersSelect,
+    });
+  } catch (error) {
+    // Older databases may not yet have the optional corner-odds columns.
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2022") throw error;
+    const legacySnapshots = await prisma.footballOddsSnapshot.findMany({
+      where: { fixtureId: id, ...VISIBLE_ODDS_HISTORY },
+      orderBy: { capturedAt: "desc" },
+      take: 100,
+      select: fixtureHistoryBaseSelect,
+    });
+    snapshots = legacySnapshots.map((snapshot) => ({
+      ...snapshot,
+      cornerAhHtLine: null,
+      cornerAhHtHomePrice: null,
+      cornerAhHtAwayPrice: null,
+      cornerOuHtLine: null,
+      cornerOuHtOverPrice: null,
+      cornerOuHtUnderPrice: null,
+      cornerAhFtLine: null,
+      cornerAhFtHomePrice: null,
+      cornerAhFtAwayPrice: null,
+      cornerOuFtLine: null,
+      cornerOuFtOverPrice: null,
+      cornerOuFtUnderPrice: null,
+      homeCornerKicks: null,
+      awayCornerKicks: null,
+      settlementData: null,
+    }));
+  }
+
   return {
     ...fixture,
     kickoffAt: fixture.kickoffAt.toISOString(),
     lastSyncedAt: fixture.lastSyncedAt?.toISOString() ?? null,
-    oddsSnapshots: fixture.oddsSnapshots.map((snapshot) => ({
+    oddsSnapshots: snapshots.map((snapshot) => ({
       ...snapshot,
+      ...displayHandicapLines(snapshot),
+      settlementData: snapshot.settlementData as SnapshotSettlement | null,
       capturedAt: snapshot.capturedAt.toISOString(),
-      providerUpdatedAt: snapshot.providerUpdatedAt?.toISOString() ?? null,
     })),
   };
 }
@@ -263,6 +355,7 @@ export async function getFixtureHistory(id: string, page: number, testMode?: boo
   if (!fixture) return null;
   const where = {
     fixtureId: id,
+    ...VISIBLE_ODDS_HISTORY,
     ...(testMode === undefined ? {} : { isTest: testMode }),
   };
   const [snapshots, total] = await Promise.all([
@@ -271,15 +364,15 @@ export async function getFixtureHistory(id: string, page: number, testMode?: boo
       orderBy: { capturedAt: "desc" },
       skip: (page - 1) * take,
       take,
-      include: { values: true },
+      select: fixtureHistoryWithCornersSelect,
     }),
     prisma.footballOddsSnapshot.count({ where }),
   ]);
   return {
     snapshots: snapshots.map((snapshot) => ({
       ...snapshot,
+      ...displayHandicapLines(snapshot),
       capturedAt: snapshot.capturedAt.toISOString(),
-      providerUpdatedAt: snapshot.providerUpdatedAt?.toISOString() ?? null,
     })),
     page,
     pageSize: take,
@@ -381,6 +474,38 @@ export async function saveOddsSnapshot({ fixtureId, raw, fixture, isTest = true 
     create: { ...fixtureData, isTestFixture: isTest },
     update: fixtureData,
   });
+  const collectorSettings = await prisma.footballCollectorSettings.findUnique({ where: { id: "default" }, select: { preferredBookmakerId: true } });
+  const markets = parseStructuredLiveMarkets(normalized.values, { home: fixtureData.homeTeamName, away: fixtureData.awayTeamName }, collectorSettings?.preferredBookmakerId);
+  let statistics = emptyFixtureStatistics();
+  let statisticsCheckedAt: Date | null = null;
+  if (LIVE_STATUSES.includes(fixtureData.status.toUpperCase())) {
+    statisticsCheckedAt = now;
+    try {
+      statistics = await fetchFixtureStatistics(fixtureId, {
+        homeId: fixtureData.homeTeamId,
+        awayId: fixtureData.awayTeamId,
+        homeName: fixtureData.homeTeamName,
+        awayName: fixtureData.awayTeamName,
+      });
+    } catch {
+      // Statistics are supplementary; a stats/quota failure must not block snapshot saving.
+    }
+  }
+  const sourceHash = compactSnapshotHash({
+    fixtureId: databaseFixture.id,
+    sourceType: "LIVE",
+    isTest,
+    slotKey: null,
+    targetMinute: null,
+    actualMinute: fixtureData.elapsedMinute,
+    period: null,
+    homeScore: fixtureData.homeScore,
+    awayScore: fixtureData.awayScore,
+    homeCornerKicks: statistics.homeCornerKicks,
+    awayCornerKicks: statistics.awayCornerKicks,
+    fixtureStatus: fixtureData.status,
+    markets,
+  });
 
   // Updating the fixture row serializes concurrent snapshot writes for one match.
   return prisma.$transaction(async (transaction) => {
@@ -394,43 +519,52 @@ export async function saveOddsSnapshot({ fixtureId, raw, fixture, isTest = true 
       select: { sourceHash: true, id: true, capturedAt: true },
     });
 
-    if (previous?.sourceHash === normalized.sourceHash) {
+    if (previous?.sourceHash === sourceHash) {
       return {
         saved: false,
         duplicate: true,
         snapshotId: previous.id,
         capturedAt: previous.capturedAt.toISOString(),
-        valueCount: normalized.values.length,
+        dataStatus: markets.dataStatus,
       };
     }
 
     const snapshot = await transaction.footballOddsSnapshot.create({
       data: {
         fixtureId: databaseFixture.id,
-        providerUpdatedAt: normalized.providerUpdatedAt,
-        sourceHash: normalized.sourceHash,
+        sourceHash,
         sourceType: "LIVE",
         isTest,
-        rawJson: raw as object,
-        values: {
-          create: normalized.values.map((value) => ({
-            providerBetId: value.providerBetId,
-            betName: value.betName,
-            bookmakerId: value.bookmakerId,
-            bookmakerName: value.bookmakerName,
-            selectionName: value.selectionName,
-            oddValue: value.oddValue,
-            oddNumeric: value.oddNumeric,
-            main: value.main,
-            suspended: value.suspended,
-            blocked: value.blocked,
-            stopped: value.stopped,
-            finished: value.finished,
-            extraData: Object.keys(value.extraData).length
-              ? JSON.parse(JSON.stringify(value.extraData)) as Prisma.InputJsonObject
-              : undefined,
-          })),
-        },
+        ahHtLine: markets.ahHtLine,
+        ahHtHomePrice: markets.ahHtHomePrice,
+        ahHtAwayPrice: markets.ahHtAwayPrice,
+        ahFtLine: markets.ahFtLine,
+        ahFtHomePrice: markets.ahFtHomePrice,
+        ahFtAwayPrice: markets.ahFtAwayPrice,
+        ouHtLine: markets.ouHtLine,
+        ouHtOverPrice: markets.ouHtOverPrice,
+        ouHtUnderPrice: markets.ouHtUnderPrice,
+        ouFtLine: markets.ouFtLine,
+        ouFtOverPrice: markets.ouFtOverPrice,
+        ouFtUnderPrice: markets.ouFtUnderPrice,
+        cornerAhHtLine: markets.cornerAhHtLine,
+        cornerAhHtHomePrice: markets.cornerAhHtHomePrice,
+        cornerAhHtAwayPrice: markets.cornerAhHtAwayPrice,
+        cornerOuHtLine: markets.cornerOuHtLine,
+        cornerOuHtOverPrice: markets.cornerOuHtOverPrice,
+        cornerOuHtUnderPrice: markets.cornerOuHtUnderPrice,
+        cornerAhFtLine: markets.cornerAhFtLine,
+        cornerAhFtHomePrice: markets.cornerAhFtHomePrice,
+        cornerAhFtAwayPrice: markets.cornerAhFtAwayPrice,
+        cornerOuFtLine: markets.cornerOuFtLine,
+        cornerOuFtOverPrice: markets.cornerOuFtOverPrice,
+        cornerOuFtUnderPrice: markets.cornerOuFtUnderPrice,
+        dataStatus: markets.dataStatus,
+        homeScore: fixtureData.homeScore,
+        awayScore: fixtureData.awayScore,
+        fixtureStatus: fixtureData.status,
+        ...statistics,
+        statisticsCheckedAt,
       },
     });
 
@@ -439,7 +573,7 @@ export async function saveOddsSnapshot({ fixtureId, raw, fixture, isTest = true 
       duplicate: false,
       snapshotId: snapshot.id,
       capturedAt: snapshot.capturedAt.toISOString(),
-      valueCount: normalized.values.length,
+      dataStatus: markets.dataStatus,
     };
   }, { isolationLevel: "Serializable" });
 }

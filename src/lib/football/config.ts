@@ -17,7 +17,7 @@ export const FOOTBALL_DEFAULTS = {
   dailyTotalLimit: integerEnv("FOOTBALL_DAILY_TOTAL_LIMIT", 7500, 1, 7500),
   dailyOddsBudget: integerEnv("FOOTBALL_DAILY_ODDS_BUDGET", 6000, 0, 7500),
   dailyReservedBudget: integerEnv("FOOTBALL_DAILY_RESERVED_BUDGET", 1500, 0, 7500),
-  livePollingIntervalSeconds: integerEnv("FOOTBALL_LIVE_POLL_SECONDS", 300, 300, 3600),
+  livePollingIntervalSeconds: integerEnv("FOOTBALL_LIVE_POLL_SECONDS", 300, 60, 3600),
   collectorEnabled: booleanEnv("FOOTBALL_COLLECTOR_ENABLED", true),
   oddsIntervalMinutes: integerEnv("FOOTBALL_ODDS_INTERVAL_MINUTES", 5, 1, 15),
   fixtureSyncIntervalHours: integerEnv("FOOTBALL_FIXTURE_SYNC_HOURS", 6, 1, 24),

@@ -2,7 +2,10 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { normalizeLiveOdds } from "./normalizer";
 import { parseStructuredLiveMarkets, type PeriodKey } from "./markets";
+import { compactSnapshotHash } from "./snapshot-hash";
+import { emptyFixtureStatistics, fetchFixtureCornerResults, fetchFixtureStatistics } from "./statistics";
 import { resultStatusFromScores, shouldCaptureSlot, shouldMarkEarlierSlotMissed } from "./collection-rules";
+import { settleFixtureOdds } from "./settlement";
 
 type ProviderFixtureState = {
   id: string;
@@ -12,6 +15,8 @@ type ProviderFixtureState = {
   elapsedExtraTime: number;
   homeScore: number | null;
   awayScore: number | null;
+  homeTeamId: number | null;
+  awayTeamId: number | null;
   homeScoreHt: number | null;
   awayScoreHt: number | null;
   homeScoreFt: number | null;
@@ -52,6 +57,45 @@ export async function transitionTrackingFromFixture(trackingId: string, fixture:
         where: { trackingId, status: "PENDING" }, data: { status: "MISSED", error: "Fixture ended before this slot was captured." },
       }),
     ]);
+    try {
+      const latestSnapshot = await prisma.footballOddsSnapshot.findFirst({
+        where: { trackingId },
+        orderBy: { capturedAt: "desc" },
+        select: {
+          id: true,
+          homeCornerKicks: true,
+          awayCornerKicks: true,
+        },
+      });
+      const cornerResults = await fetchFixtureCornerResults(fixture.providerFixtureId, {
+        homeId: fixture.homeTeamId,
+        awayId: fixture.awayTeamId,
+        homeName: fixture.homeTeamName,
+        awayName: fixture.awayTeamName,
+      });
+      const cornerResultData = {
+        ...(cornerResults.homeCornerKicksHt !== null ? { homeCornerKicksHt: cornerResults.homeCornerKicksHt } : {}),
+        ...(cornerResults.awayCornerKicksHt !== null ? { awayCornerKicksHt: cornerResults.awayCornerKicksHt } : {}),
+        ...(cornerResults.homeCornerKicksFt !== null ? { homeCornerKicksFt: cornerResults.homeCornerKicksFt } : {}),
+        ...(cornerResults.awayCornerKicksFt !== null ? { awayCornerKicksFt: cornerResults.awayCornerKicksFt } : {}),
+      };
+      if (Object.keys(cornerResultData).length) {
+        await prisma.footballFixture.update({ where: { id: fixture.id }, data: cornerResultData });
+      }
+      if (latestSnapshot) {
+        await prisma.footballOddsSnapshot.update({
+          where: { id: latestSnapshot.id },
+          data: {
+            homeCornerKicks: cornerResults.homeCornerKicksFt ?? latestSnapshot.homeCornerKicks,
+            awayCornerKicks: cornerResults.awayCornerKicksFt ?? latestSnapshot.awayCornerKicks,
+            statisticsCheckedAt: now,
+          },
+        });
+      }
+    } catch {
+      // Final statistics are supplementary and must not block result completion.
+    }
+    await settleFixtureOdds(fixture.id);
     await writeLog(trackingId, "INFO", "TRACKING_COMPLETED", `Fixture ${fixture.providerFixtureId} finished; live odds collection stopped.`, {
       resultStatus, homeScoreFt: fixture.homeScoreFt, awayScoreFt: fixture.awayScoreFt,
     });
@@ -113,76 +157,140 @@ export async function captureTrackedOdds(input: {
   slotKey: string;
   targetMinute: number;
   actualMinute: number;
-  period: PeriodKey;
+  period: PeriodKey | "PREMATCH";
   isTest?: boolean;
+  sourceType?: "LIVE" | "PREMATCH";
 }) {
-  const { trackingId, fixture, raw, slotKey, targetMinute, actualMinute, period, isTest = false } = input;
-  await markEarlierSlotsMissed(trackingId, period, targetMinute);
+  const { trackingId, fixture, raw, slotKey, targetMinute, actualMinute, period, isTest = false, sourceType = "LIVE" } = input;
+  if (period !== "PREMATCH") {
+    await prisma.footballTrackingSlot.upsert({
+      where: { trackingId_slotKey: { trackingId, slotKey } },
+      create: { trackingId, slotKey, targetMinute, period, status: "PENDING" },
+      update: {},
+    });
+    await markEarlierSlotsMissed(trackingId, period, targetMinute);
+  }
   const existing = await prisma.footballOddsSnapshot.findFirst({ where: { trackingId, slotKey }, select: { id: true, capturedAt: true, dataStatus: true } });
   if (!shouldCaptureSlot(existing)) {
-    await prisma.footballTrackingSlot.updateMany({ where: { trackingId, slotKey }, data: { status: existing.dataStatus === "MISSING" ? "MISSING" : "SAVED" } });
-    return { saved: false, duplicate: true, dataStatus: existing.dataStatus };
+    await prisma.footballTrackingSlot.updateMany({ where: { trackingId, slotKey }, data: { status: existing?.dataStatus === "MISSING" ? "MISSING" : "SAVED" } });
+    return { saved: false, duplicate: true, dataStatus: existing?.dataStatus ?? null };
   }
 
   const normalized = normalizeLiveOdds(raw, fixture.providerFixtureId);
+  if (existing && normalized.values.length === 0) {
+    return { saved: false, duplicate: true, dataStatus: existing.dataStatus };
+  }
   const settings = await prisma.footballCollectorSettings.findUnique({ where: { id: "default" }, select: { preferredBookmakerId: true } });
   const markets = parseStructuredLiveMarkets(normalized.values, { home: fixture.homeTeamName, away: fixture.awayTeamName }, settings?.preferredBookmakerId);
   const capturedAt = new Date();
-  const rawJson = JSON.parse(JSON.stringify(raw)) as Prisma.InputJsonValue;
+  let statistics = period === "PREMATCH"
+    ? { homeCornerKicks: 0, awayCornerKicks: 0 }
+    : emptyFixtureStatistics();
+  let statisticsCheckedAt: Date | null = null;
+  if (period !== "PREMATCH") {
+    const previousStatistics = await prisma.footballOddsSnapshot.findFirst({
+      where: { trackingId, statisticsCheckedAt: { not: null } },
+      orderBy: { capturedAt: "desc" },
+      select: {
+        homeCornerKicks: true,
+        awayCornerKicks: true,
+        statisticsCheckedAt: true,
+      },
+    });
+    if (previousStatistics) {
+      statistics = {
+        homeCornerKicks: previousStatistics.homeCornerKicks,
+        awayCornerKicks: previousStatistics.awayCornerKicks,
+      };
+      statisticsCheckedAt = previousStatistics.statisticsCheckedAt;
+    }
+
+    if (!statisticsCheckedAt || capturedAt.getTime() - statisticsCheckedAt.getTime() >= 5 * 60_000) {
+      statisticsCheckedAt = capturedAt;
+      try {
+        const latest = await fetchFixtureStatistics(fixture.providerFixtureId, {
+          homeId: fixture.homeTeamId,
+          awayId: fixture.awayTeamId,
+          homeName: fixture.homeTeamName,
+          awayName: fixture.awayTeamName,
+        });
+        statistics = {
+          homeCornerKicks: latest.homeCornerKicks ?? statistics.homeCornerKicks,
+          awayCornerKicks: latest.awayCornerKicks ?? statistics.awayCornerKicks,
+        };
+      } catch {
+        // Statistics are supplementary; a stats/quota failure must not block odds capture.
+      }
+    }
+  }
+  const sourceHash = compactSnapshotHash({
+    fixtureId: fixture.id,
+    sourceType,
+    isTest,
+    slotKey,
+    targetMinute,
+    actualMinute,
+    period,
+    homeScore: fixture.homeScore,
+    awayScore: fixture.awayScore,
+    homeCornerKicks: statistics.homeCornerKicks,
+    awayCornerKicks: statistics.awayCornerKicks,
+    fixtureStatus: fixture.status,
+    markets,
+  });
   try {
     const snapshot = await prisma.$transaction(async (transaction) => {
       await transaction.footballFixture.update({ where: { id: fixture.id }, data: { lastSyncedAt: capturedAt } });
-      const created = await transaction.footballOddsSnapshot.create({
-        data: {
-          fixtureId: fixture.id,
-          trackingId,
-          slotKey,
-          targetMinute,
-          actualMinute,
-          period,
-          homeScore: fixture.homeScore,
-          awayScore: fixture.awayScore,
-          fixtureStatus: fixture.status,
-          dataStatus: markets.dataStatus,
-          bookmakerId: markets.bookmakerId,
-          bookmakerName: markets.bookmakerName,
-          ahHtLine: markets.ahHtLine,
-          ahHtHomePrice: markets.ahHtHomePrice,
-          ahHtAwayPrice: markets.ahHtAwayPrice,
-          ahFtLine: markets.ahFtLine,
-          ahFtHomePrice: markets.ahFtHomePrice,
-          ahFtAwayPrice: markets.ahFtAwayPrice,
-          ouHtLine: markets.ouHtLine,
-          ouHtOverPrice: markets.ouHtOverPrice,
-          ouHtUnderPrice: markets.ouHtUnderPrice,
-          ouFtLine: markets.ouFtLine,
-          ouFtOverPrice: markets.ouFtOverPrice,
-          ouFtUnderPrice: markets.ouFtUnderPrice,
-          missingMarkets: markets.missingMarkets as Prisma.InputJsonValue,
-          providerUpdatedAt: normalized.providerUpdatedAt,
-          sourceHash: normalized.sourceHash,
-          sourceType: "LIVE",
-          isTest,
-          rawJson,
-          values: {
-            create: normalized.values.map((value) => ({
-              providerBetId: value.providerBetId,
-              betName: value.betName,
-              bookmakerId: value.bookmakerId,
-              bookmakerName: value.bookmakerName,
-              selectionName: value.selectionName,
-              oddValue: value.oddValue,
-              oddNumeric: value.oddNumeric,
-              main: value.main,
-              suspended: value.suspended,
-              blocked: value.blocked,
-              stopped: value.stopped,
-              finished: value.finished,
-              extraData: Object.keys(value.extraData).length ? value.extraData as Prisma.InputJsonObject : undefined,
-            })),
-          },
-        },
-      });
+      const snapshotData = {
+        fixtureId: fixture.id,
+        trackingId,
+        slotKey,
+        targetMinute,
+        actualMinute,
+        period,
+        capturedAt,
+        homeScore: fixture.homeScore,
+        awayScore: fixture.awayScore,
+        ...statistics,
+        statisticsCheckedAt,
+        fixtureStatus: fixture.status,
+        dataStatus: markets.dataStatus,
+        ahHtLine: markets.ahHtLine,
+        ahHtHomePrice: markets.ahHtHomePrice,
+        ahHtAwayPrice: markets.ahHtAwayPrice,
+        ahFtLine: markets.ahFtLine,
+        ahFtHomePrice: markets.ahFtHomePrice,
+        ahFtAwayPrice: markets.ahFtAwayPrice,
+        ouHtLine: markets.ouHtLine,
+        ouHtOverPrice: markets.ouHtOverPrice,
+        ouHtUnderPrice: markets.ouHtUnderPrice,
+        ouFtLine: markets.ouFtLine,
+        ouFtOverPrice: markets.ouFtOverPrice,
+        ouFtUnderPrice: markets.ouFtUnderPrice,
+        cornerAhHtLine: markets.cornerAhHtLine,
+        cornerAhHtHomePrice: markets.cornerAhHtHomePrice,
+        cornerAhHtAwayPrice: markets.cornerAhHtAwayPrice,
+        cornerOuHtLine: markets.cornerOuHtLine,
+        cornerOuHtOverPrice: markets.cornerOuHtOverPrice,
+        cornerOuHtUnderPrice: markets.cornerOuHtUnderPrice,
+        cornerAhFtLine: markets.cornerAhFtLine,
+        cornerAhFtHomePrice: markets.cornerAhFtHomePrice,
+        cornerAhFtAwayPrice: markets.cornerAhFtAwayPrice,
+        cornerOuFtLine: markets.cornerOuFtLine,
+        cornerOuFtOverPrice: markets.cornerOuFtOverPrice,
+        cornerOuFtUnderPrice: markets.cornerOuFtUnderPrice,
+        sourceHash,
+        sourceType,
+        isTest,
+      };
+      const created = existing
+        ? await transaction.footballOddsSnapshot.update({
+          where: { id: existing.id },
+          data: snapshotData,
+        })
+        : await transaction.footballOddsSnapshot.create({
+          data: snapshotData,
+        });
       await transaction.footballTrackingSlot.updateMany({
         where: { trackingId, slotKey },
         data: { status: markets.dataStatus === "MISSING" ? "MISSING" : "SAVED", actualMinute, capturedAt, error: null },
@@ -193,11 +301,11 @@ export async function captureTrackedOdds(input: {
       });
       return created;
     }, { isolationLevel: "Serializable" });
-    await writeLog(trackingId, markets.dataStatus === "MISSING" ? "WARN" : "INFO", "ODDS_SLOT_CAPTURED", `${slotKey} saved at provider minute ${actualMinute} (${markets.dataStatus}).`, {
-      snapshotId: snapshot.id, targetMinute, actualMinute, period, missingMarkets: markets.missingMarkets,
+    await writeLog(trackingId, markets.dataStatus === "MISSING" ? "WARN" : "INFO", existing ? "ODDS_SLOT_REPAIRED" : "ODDS_SLOT_CAPTURED", `${slotKey} ${existing ? "repaired" : "saved"} at ${sourceType === "PREMATCH" ? "pre-match" : `provider minute ${actualMinute}`} (${markets.dataStatus}).`, {
+      snapshotId: snapshot.id, targetMinute, actualMinute, period, sourceType, missingMarkets: markets.missingMarkets,
       bookmakerId: markets.bookmakerId, bookmakerName: markets.bookmakerName,
     });
-    return { saved: true, duplicate: false, snapshotId: snapshot.id, dataStatus: markets.dataStatus, valueCount: normalized.values.length };
+    return { saved: true, duplicate: false, snapshotId: snapshot.id, dataStatus: markets.dataStatus };
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       const existingSlot = await prisma.footballOddsSnapshot.findFirst({ where: { trackingId, slotKey }, select: { dataStatus: true } });

@@ -1,18 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertCircle,
   ArrowLeft,
+  BarChart3,
   Check,
   ChevronDown,
   Clock3,
   Database,
   Eye,
   FileCheck2,
+  History,
   KeyRound,
   LoaderCircle,
   Moon,
@@ -37,6 +39,7 @@ import {
 } from "recharts";
 import { Metric } from "@/app/_page/ui";
 import { FOOTBALL_LEAGUES, getFootballLeague } from "@/lib/football/leagues";
+import { parseStructuredLiveMarkets } from "@/lib/football/markets";
 import { FOOTBALL_TAB_PATHS, type FootballTab } from "../routes";
 
 type Fixture = {
@@ -63,6 +66,10 @@ type Fixture = {
   awayScoreHt?: number | null;
   homeScoreFt?: number | null;
   awayScoreFt?: number | null;
+  homeCornerKicksHt?: number | null;
+  awayCornerKicksHt?: number | null;
+  homeCornerKicksFt?: number | null;
+  awayCornerKicksFt?: number | null;
   resultStatus?: string;
   liveTracking?: { id: string; status: string; isEnabled: boolean } | null;
   isTestFixture?: boolean;
@@ -75,6 +82,7 @@ type OddsValue = {
   bookmakerName: string | null;
   selectionName: string;
   oddValue: string;
+  oddNumeric: string | null;
   main: boolean | null;
   suspended: boolean | null;
   blocked: boolean | null;
@@ -147,6 +155,8 @@ type FixtureRow = Fixture & {
   latestAhFtLine: string | number | null;
   latestAhFtHomePrice: string | number | null;
   latestAhFtAwayPrice: string | number | null;
+  latestHomeCornerKicks?: number | null;
+  latestAwayCornerKicks?: number | null;
 };
 
 type FixtureLeagueGroup = {
@@ -155,21 +165,70 @@ type FixtureLeagueGroup = {
   fixtures: FixtureRow[];
 };
 
+type SettlementStatus = "WIN" | "LOSS" | "PUSH" | "HALF_WIN" | "HALF_LOSS";
+type SnapshotSettlement = Partial<Record<
+  | "ahHtHome" | "ahHtAway" | "ouHtOver" | "ouHtUnder"
+  | "ahFtHome" | "ahFtAway" | "ouFtOver" | "ouFtUnder"
+  | "cornerAhHtHome" | "cornerAhHtAway" | "cornerOuHtOver" | "cornerOuHtUnder"
+  | "cornerAhFtHome" | "cornerAhFtAway" | "cornerOuFtOver" | "cornerOuFtUnder",
+  SettlementStatus
+>>;
+
+type FootballAnalyticsGroup = {
+  key: string;
+  bucketStart: number;
+  bucketEnd: number;
+  score: string;
+  corners: string | null;
+  marketKey: string;
+  marketLabel: string;
+  selection: string;
+  line: string;
+  priceTolerance: number;
+  matchCount: number;
+  outcomes: Record<SettlementStatus, number>;
+  winRate: number | null;
+  matches: Array<{
+    fixtureId: string;
+    providerFixtureId: number;
+    homeTeamName: string;
+    awayTeamName: string;
+    kickoffAt: string;
+    actualMinute: number;
+    score: string;
+    corners: string | null;
+    finalScore: string;
+    finalCorners: string | null;
+    firstPrice: string;
+    secondPrice: string;
+    outcome: SettlementStatus;
+  }>;
+};
+
+type FootballAnalyticsResponse = {
+  bucketSize: number;
+  priceTolerance: number;
+  snapshotCount: number;
+  groupCount: number;
+  groups: FootballAnalyticsGroup[];
+};
+
 type FixtureDetails = FixtureRow & {
   oddsSnapshots: Array<{
     id: string;
     capturedAt: string;
-    providerUpdatedAt: string | null;
     isTest: boolean;
+    sourceType: "LIVE" | "PREMATCH";
     slotKey: string | null;
     targetMinute: number | null;
     actualMinute: number | null;
     period: string | null;
     homeScore: number | null;
     awayScore: number | null;
+    homeCornerKicks: number | null;
+    awayCornerKicks: number | null;
     fixtureStatus: string | null;
     dataStatus: string | null;
-    bookmakerName: string | null;
     ahHtLine: string | number | null;
     ahHtHomePrice: string | number | null;
     ahHtAwayPrice: string | number | null;
@@ -182,9 +241,19 @@ type FixtureDetails = FixtureRow & {
     ouFtLine: string | number | null;
     ouFtOverPrice: string | number | null;
     ouFtUnderPrice: string | number | null;
-    missingMarkets: unknown;
-    rawJson: unknown;
-    values: Array<OddsValue & { id: string }>;
+    cornerAhHtLine: string | number | null;
+    cornerAhHtHomePrice: string | number | null;
+    cornerAhHtAwayPrice: string | number | null;
+    cornerOuHtLine: string | number | null;
+    cornerOuHtOverPrice: string | number | null;
+    cornerOuHtUnderPrice: string | number | null;
+    cornerAhFtLine: string | number | null;
+    cornerAhFtHomePrice: string | number | null;
+    cornerAhFtAwayPrice: string | number | null;
+    cornerOuFtLine: string | number | null;
+    cornerOuFtOverPrice: string | number | null;
+    cornerOuFtUnderPrice: string | number | null;
+    settlementData: SnapshotSettlement | null;
   }>;
 };
 
@@ -237,6 +306,9 @@ type TrackingRow = {
   lastError: string | null;
   snapshotCount: number;
   missingSnapshotCount: number;
+  latestOddsAt: string | null;
+  latestHomeCornerKicks: number | null;
+  latestAwayCornerKicks: number | null;
   lastSlot: { slotKey: string; actualMinute: number | null; status: string; capturedAt: string | null } | null;
   fixture: FixtureRow & { league?: { key: string; shortName: string } | null };
 };
@@ -311,7 +383,7 @@ function formatAsianHandicapLine(value: string | number | null) {
   const line = Number(value);
   if (!Number.isFinite(line)) return String(value);
 
-  const sign = line < 0 ? "-" : "";
+  const sign = line < 0 ? "-" : line > 0 ? "+" : "";
   const absolute = Math.abs(line);
   const whole = Math.floor(absolute + 1e-8);
   const fraction = absolute - whole;
@@ -444,9 +516,10 @@ const TABS = [
   { id: "fixtures", label: "Trận đấu", icon: Clock3 },
   { id: "radar", label: "Live Radar", icon: Activity },
   { id: "live", label: "Live Recording", icon: Wifi },
+  { id: "history", label: "Lịch sử odds", icon: History },
+  { id: "analytics", label: "Phân tích", icon: BarChart3 },
   { id: "results", label: "Kết quả thiếu", icon: FileCheck2 },
   { id: "system", label: "System Status", icon: ServerCog },
-  { id: "test", label: "Kiểm tra API", icon: Search },
   { id: "settings", label: "Cấu hình", icon: Settings2 },
   { id: "logs", label: "Nhật ký", icon: Database },
 ] as const;
@@ -459,6 +532,26 @@ function vietnamDateInput(offset = 0) {
   const date = new Date(`${get("year")}-${get("month")}-${get("day")}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + offset);
   return date.toISOString().slice(0, 10);
+}
+
+function formatHandicapLine(line: string | number | null) {
+  if (line === null) return "—";
+  const value = Number(line);
+  if (!Number.isFinite(value)) return String(line);
+  const normalized = Number(value.toFixed(4));
+  if (normalized === 0) return "0";
+  return normalized > 0 ? `+${normalized}` : String(normalized);
+}
+
+function settlementBadgeClass(outcome: SettlementStatus) {
+  const statusClass: Record<SettlementStatus, string> = {
+    WIN: "settlement-win",
+    HALF_WIN: "settlement-half-win",
+    PUSH: "settlement-push",
+    LOSS: "settlement-loss",
+    HALF_LOSS: "settlement-half-loss",
+  };
+  return `settlement-badge ${statusClass[outcome]}`;
 }
 
 export default function FootballDashboard({ initialTab = "overview", requiresAdminToken }: { initialTab?: Tab; requiresAdminToken: boolean }) {
@@ -475,6 +568,18 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
   const [fixtureLeagueId, setFixtureLeagueId] = useState("");
   const [fixtureStatus, setFixtureStatus] = useState("");
   const [fixtureSearch, setFixtureSearch] = useState("");
+  const [historyFrom, setHistoryFrom] = useState(() => vietnamDateInput(-30));
+  const [historyTo, setHistoryTo] = useState(() => vietnamDateInput());
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyPage, setHistoryPage] = useState(1);
+  const [analyticsBucketSize, setAnalyticsBucketSize] = useState(5);
+  const [analyticsFrom, setAnalyticsFrom] = useState("");
+  const [analyticsTo, setAnalyticsTo] = useState("");
+  const [analyticsLeague, setAnalyticsLeague] = useState("ALL");
+  const [analyticsPriceTolerance, setAnalyticsPriceTolerance] = useState(0);
+  const [analyticsMarket, setAnalyticsMarket] = useState("ALL");
+  const [analyticsSort, setAnalyticsSort] = useState<{ key: "minute" | "winRate"; direction: "asc" | "desc" }>({ key: "minute", direction: "asc" });
+  const [expandedAnalyticsGroups, setExpandedAnalyticsGroups] = useState<Record<string, boolean>>({});
   const [testSearch, setTestSearch] = useState("");
   const [testFixtures, setTestFixtures] = useState<Fixture[]>([]);
   const [systemChecks, setSystemChecks] = useState<Record<string, SystemCheck>>({});
@@ -537,6 +642,26 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
     enabled: hasAccess && tab === "fixtures",
     refetchInterval: 30_000,
   });
+  const oddsHistoryFixturesQuery = useQuery({
+    queryKey: ["football", "odds-history-fixtures", historyFrom, historyTo, historySearch, historyPage, token],
+    queryFn: () => requestJson<{ fixtures: FixtureRow[]; total: number; page: number; pageSize: number }>(
+      token,
+      `/api/football/fixtures?${new URLSearchParams({ recorded: "true", from: historyFrom, to: historyTo, page: String(historyPage), ...(historySearch.trim() ? { search: historySearch.trim() } : {}) })}`,
+    ),
+    enabled: hasAccess && tab === "history",
+    refetchInterval: 30_000,
+  });
+  const footballAnalyticsQuery = useQuery({
+    queryKey: ["football", "analytics", analyticsBucketSize, analyticsFrom, analyticsTo, analyticsLeague, analyticsPriceTolerance, token],
+    queryFn: () => {
+      const params = new URLSearchParams({ bucketSize: String(analyticsBucketSize), priceTolerance: String(analyticsPriceTolerance), league: analyticsLeague });
+      if (analyticsFrom) params.set("from", analyticsFrom);
+      if (analyticsTo) params.set("to", analyticsTo);
+      return requestJson<FootballAnalyticsResponse>(token, `/api/football/analytics?${params}`);
+    },
+    enabled: hasAccess && tab === "analytics",
+    refetchOnWindowFocus: false,
+  });
   const discoveryQuery = useQuery({
     queryKey: ["football", "fixture-discovery", discoveryMode, token],
     queryFn: () => requestJson<{
@@ -563,6 +688,7 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
     queryKey: ["football", "fixture", selectedFixtureId, token],
     queryFn: () => requestJson<FixtureDetails>(token, `/api/football/fixtures/${selectedFixtureId}`),
     enabled: hasAccess && Boolean(selectedFixtureId),
+    refetchInterval: 15_000,
   });
   const trackingQuery = useQuery({
     queryKey: ["football", "tracking-live", token],
@@ -644,14 +770,26 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
   });
 
   const normalizedOddsByMarket = useMemo(() => {
-    const grouped = new Map<string, OddsValue[]>();
-    for (const value of testResult?.normalized.values ?? []) {
-      const rows = grouped.get(value.betName) ?? [];
-      rows.push(value);
-      grouped.set(value.betName, rows);
-    }
-    return Array.from(grouped.entries());
-  }, [testResult]);
+    if (!testResult) return null;
+    const markets = parseStructuredLiveMarkets(testResult.normalized.values, {
+      home: selectedTestFixture?.homeTeamName ?? "Home",
+      away: selectedTestFixture?.awayTeamName ?? "Away",
+    }, settingsDraft.preferredBookmakerId);
+    return {
+      bookmakerName: markets.bookmakerName,
+      dataStatus: markets.dataStatus,
+      rows: [
+        ["AH H1", markets.ahHtLine, markets.ahHtHomePrice, markets.ahHtAwayPrice],
+        ["OU H1", markets.ouHtLine, markets.ouHtOverPrice, markets.ouHtUnderPrice],
+        ["AH FT", markets.ahFtLine, markets.ahFtHomePrice, markets.ahFtAwayPrice],
+        ["OU FT", markets.ouFtLine, markets.ouFtOverPrice, markets.ouFtUnderPrice],
+        ["AH góc H1", markets.cornerAhHtLine, markets.cornerAhHtHomePrice, markets.cornerAhHtAwayPrice],
+        ["OU góc H1", markets.cornerOuHtLine, markets.cornerOuHtOverPrice, markets.cornerOuHtUnderPrice],
+        ["AH góc FT", markets.cornerAhFtLine, markets.cornerAhFtHomePrice, markets.cornerAhFtAwayPrice],
+        ["OU góc FT", markets.cornerOuFtLine, markets.cornerOuFtOverPrice, markets.cornerOuFtUnderPrice],
+      ] as Array<[string, string | null, string | null, string | null]>,
+    };
+  }, [testResult, selectedTestFixture, settingsDraft.preferredBookmakerId]);
 
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -785,7 +923,7 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
     if (!testResult) return;
     const fixtureId = Number(fixtureIdDraft);
     try {
-      const result = await requestJson<{ saved: boolean; duplicate: boolean; valueCount: number }>(
+      const result = await requestJson<{ saved: boolean; duplicate: boolean; dataStatus: string }>(
         token,
         "/api/football/test/save-snapshot",
         {
@@ -795,7 +933,7 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
       );
       setActionMessage(result.duplicate
         ? "Odds giống snapshot gần nhất. Không tạo bản ghi trùng."
-        : `Đã lưu snapshot với ${result.valueCount} lựa chọn odds.`);
+        : `Đã lưu snapshot AH / OU (${result.dataStatus}).`);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["football", "overview"] }),
         queryClient.invalidateQueries({ queryKey: ["football", "fixtures"] }),
@@ -833,6 +971,22 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
   const otherFixtureRows = allFixtureRows
     .filter((fixture) => !groupedFixtureIds.has(fixture.id))
     .sort((left, right) => Date.parse(left.kickoffAt) - Date.parse(right.kickoffAt));
+  const visibleAnalyticsGroups = [...(footballAnalyticsQuery.data?.groups ?? [])]
+    .filter((group) => analyticsMarket === "ALL" || group.marketKey === analyticsMarket)
+    .sort((left, right) => {
+      if (analyticsSort.key === "winRate") {
+        if (left.winRate === null && right.winRate !== null) return 1;
+        if (left.winRate !== null && right.winRate === null) return -1;
+        if (left.winRate !== null && right.winRate !== null) {
+          const rateOrder = left.winRate - right.winRate;
+          if (rateOrder !== 0) return analyticsSort.direction === "asc" ? rateOrder : -rateOrder;
+        }
+      } else {
+        const minuteOrder = left.bucketStart - right.bucketStart || left.bucketEnd - right.bucketEnd;
+        if (minuteOrder !== 0) return analyticsSort.direction === "asc" ? minuteOrder : -minuteOrder;
+      }
+      return left.bucketStart - right.bucketStart || left.marketLabel.localeCompare(right.marketLabel) || left.score.localeCompare(right.score);
+    });
 
   if (requiresAdminToken && (!token || hasConnectionError)) {
     return (
@@ -923,7 +1077,7 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
   return (
     <main className={`min-h-screen bg-slate-50 text-slate-900 ${darkMode ? "football-theme-dark" : ""}`}>
       <Header onLogout={requiresAdminToken ? logout : undefined} darkMode={darkMode} onToggleTheme={toggleTheme} />
-      <div className="mx-auto grid max-w-7xl gap-6 px-4 pb-12 pt-6 sm:px-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:px-8">
+      <div className="grid w-full gap-4 px-4 pb-12 pt-6 lg:grid-cols-[220px_minmax(0,1fr)]">
         <aside className="lg:sticky lg:top-20 lg:self-start">
           <nav className="grid grid-cols-2 gap-1 rounded border border-slate-200 bg-white p-2 sm:grid-cols-4 lg:grid-cols-1" aria-label="Football collector sections">
             {TABS.map(({ id, label, icon: Icon }) => (
@@ -1120,6 +1274,151 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
             </section>
           )}
 
+          {tab === "analytics" && <section className="overflow-hidden rounded border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
+              <div>
+                <h2 className="font-semibold text-slate-950">Phân tích kèo theo khung phút</h2>
+                <p className="mt-1 text-xs text-slate-500">Gom các trận có cùng tỷ số tại snapshot, cùng loại kèo và line; hai mức giá được so theo độ chênh đã chọn.</p>
+              </div>
+              <button onClick={() => void footballAnalyticsQuery.refetch()} className="inline-flex h-9 items-center gap-2 rounded border border-slate-300 px-3 text-xs font-semibold text-slate-700"><RefreshCw size={14} className={footballAnalyticsQuery.isFetching ? "animate-spin" : ""} /> Tải lại</button>
+            </div>
+            <div className="grid gap-3 border-b border-slate-100 p-4 sm:grid-cols-2 xl:grid-cols-6">
+              <label className="text-xs font-medium text-slate-600">Giải đấu
+                <select value={analyticsLeague} onChange={(event) => setAnalyticsLeague(event.target.value)} className="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">
+                  <option value="ALL">Tất cả giải</option>
+                  <option value="SAVED">9 giải đã lưu</option>
+                  <option value="OTHER">Giải khác</option>
+                  <optgroup label="Chọn từng giải đã lưu">
+                    {FOOTBALL_LEAGUES.map((league) => <option key={league.id} value={league.id}>{league.shortName} · {league.country}</option>)}
+                  </optgroup>
+                </select>
+              </label>
+              <label className="text-xs font-medium text-slate-600">Gom khung phút
+                <select value={analyticsBucketSize} onChange={(event) => setAnalyticsBucketSize(Number(event.target.value))} className="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">
+                  {[1, 2, 3, 5, 10, 15].map((size) => <option key={size} value={size}>{size} phút</option>)}
+                </select>
+              </label>
+              <label className="text-xs font-medium text-slate-600">Từ ngày
+                <input type="date" value={analyticsFrom} onChange={(event) => setAnalyticsFrom(event.target.value)} className="mt-1 h-9 w-full rounded border border-slate-300 px-2 text-sm" />
+              </label>
+              <label className="text-xs font-medium text-slate-600">Đến ngày
+                <input type="date" value={analyticsTo} onChange={(event) => setAnalyticsTo(event.target.value)} className="mt-1 h-9 w-full rounded border border-slate-300 px-2 text-sm" />
+              </label>
+              <label className="text-xs font-medium text-slate-600">Loại kèo
+                <select value={analyticsMarket} onChange={(event) => setAnalyticsMarket(event.target.value)} className="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">
+                  <option value="ALL">Tất cả kèo</option>
+                  <option value="ahHt">Chấp H1</option><option value="ouHt">Tài/Xỉu H1</option>
+                  <option value="ahFt">Chấp FT</option><option value="ouFt">Tài/Xỉu FT</option>
+                  <option value="cornerAhHt">Chấp góc H1</option><option value="cornerOuHt">Tài/Xỉu góc H1</option>
+                  <option value="cornerAhFt">Chấp góc FT</option><option value="cornerOuFt">Tài/Xỉu góc FT</option>
+                </select>
+              </label>
+              <label className="text-xs font-medium text-slate-600">Gom theo chênh lệch giá
+                <select value={analyticsPriceTolerance} onChange={(event) => setAnalyticsPriceTolerance(Number(event.target.value))} className="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">
+                  <option value={0}>Đúng giá</option>
+                  {[0.1, 0.2, 0.3, 0.4, 0.5].map((tolerance) => <option key={tolerance} value={tolerance}>Chênh lệch tối đa {tolerance.toFixed(1)}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-slate-100 px-4 py-3 text-xs text-slate-500">
+              <span>{footballAnalyticsQuery.data?.snapshotCount ?? 0} snapshot trận đã kết thúc</span>
+              <span>{footballAnalyticsQuery.data?.groupCount ?? 0} nhóm trùng từ 2 trận</span>
+              <span>Khung {analyticsBucketSize} phút: {analyticsBucketSize === 5 ? "0–4, 5–9, 10–14…" : `0–${analyticsBucketSize - 1}, ${analyticsBucketSize}–${analyticsBucketSize * 2 - 1}…`}</span>
+            </div>
+            <div className="table-scroll overflow-x-auto">
+              <table className="w-full min-w-[1080px] text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th aria-sort={analyticsSort.key === "minute" ? analyticsSort.direction === "asc" ? "ascending" : "descending" : "none"} className="px-3 py-3"><button type="button" onClick={() => setAnalyticsSort((current) => current.key === "minute" ? { key: "minute", direction: current.direction === "asc" ? "desc" : "asc" } : { key: "minute", direction: "asc" })} className="inline-flex items-center gap-1">Khung phút{analyticsSort.key === "minute" ? analyticsSort.direction === "asc" ? " ↑" : " ↓" : ""}</button></th><th className="px-3 py-3">Tỷ số lúc ghi</th><th className="px-3 py-3">Góc lúc ghi</th><th className="px-3 py-3">Kèo</th><th className="px-3 py-3">Line</th><th className="px-3 py-3">Kết quả</th><th className="px-3 py-3 text-right">Số trận</th><th aria-sort={analyticsSort.key === "winRate" ? analyticsSort.direction === "asc" ? "ascending" : "descending" : "none"} className="px-3 py-3 text-right"><button type="button" onClick={() => setAnalyticsSort((current) => current.key === "winRate" ? { key: "winRate", direction: current.direction === "asc" ? "desc" : "asc" } : { key: "winRate", direction: "desc" })} className="inline-flex items-center gap-1">Tỷ lệ thắng{analyticsSort.key === "winRate" ? analyticsSort.direction === "asc" ? " ↑" : " ↓" : ""}</button></th><th className="px-3 py-3 text-right">Chi tiết</th></tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {visibleAnalyticsGroups.map((group) => {
+                    const expanded = Boolean(expandedAnalyticsGroups[group.key]);
+                    const isHandicap = group.marketKey.toLowerCase().includes("ah");
+                    const displayLine = isHandicap ? formatHandicapLine(group.line) : group.line;
+                    return <Fragment key={group.key}>
+                      <tr className="hover:bg-slate-50/70">
+                        <td className="px-3 py-3 font-semibold tabular-nums">{group.bucketStart}–{group.bucketEnd}′</td>
+                        <td className="px-3 py-3 font-semibold tabular-nums">{group.score}</td>
+                        <td className="px-3 py-3 tabular-nums">{group.corners ?? "—"}</td>
+                        <td className="px-3 py-3">{group.marketLabel} · {group.selection}</td>
+                        <td className="px-3 py-3 font-semibold tabular-nums">{displayLine}</td>
+                        <td className="px-3 py-3"><div className="flex flex-wrap gap-1.5">
+                          {group.outcomes.WIN > 0 && <span className={`${settlementBadgeClass("WIN")} rounded px-1.5 py-0.5 text-xs`}>Thắng {group.outcomes.WIN}</span>}
+                          {group.outcomes.HALF_WIN > 0 && <span className={`${settlementBadgeClass("HALF_WIN")} rounded px-1.5 py-0.5 text-xs`}>Nửa thắng {group.outcomes.HALF_WIN}</span>}
+                          {group.outcomes.PUSH > 0 && <span className={`${settlementBadgeClass("PUSH")} rounded px-1.5 py-0.5 text-xs`}>Hòa {group.outcomes.PUSH}</span>}
+                          {group.outcomes.HALF_LOSS > 0 && <span className={`${settlementBadgeClass("HALF_LOSS")} rounded px-1.5 py-0.5 text-xs`}>Nửa thua {group.outcomes.HALF_LOSS}</span>}
+                          {group.outcomes.LOSS > 0 && <span className={`${settlementBadgeClass("LOSS")} rounded px-1.5 py-0.5 text-xs`}>Thua {group.outcomes.LOSS}</span>}
+                        </div></td>
+                        <td className="px-3 py-3 text-right font-semibold tabular-nums">{group.matchCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{group.winRate === null ? "—" : `${group.winRate}%`}</td>
+                        <td className="px-3 py-3 text-right"><button onClick={() => setExpandedAnalyticsGroups((current) => ({ ...current, [group.key]: !current[group.key] }))} className="h-8 rounded border border-slate-300 px-2.5 text-xs font-semibold text-slate-700">{expanded ? "Ẩn" : "Xem trận"}</button></td>
+                      </tr>
+                      {expanded && <tr className="bg-slate-50"><td colSpan={9} className="p-3"><div className="table-scroll overflow-x-auto rounded border border-slate-200 bg-white"><table className="w-full min-w-[880px] text-left text-xs"><thead className="bg-slate-100 text-slate-500"><tr><th className="px-3 py-2">Trận</th><th className="px-3 py-2">Phút</th><th className="px-3 py-2">Tỷ số lúc ghi</th><th className="px-3 py-2">Góc lúc ghi</th><th className="px-3 py-2">Tỷ số chốt kèo (góc)</th><th className="px-3 py-2">Giá hai cửa</th><th className="px-3 py-2">Kết quả</th></tr></thead><tbody className="divide-y divide-slate-100">{group.matches.map((match) => <tr key={`${match.fixtureId}-${match.actualMinute}`}><td className="px-3 py-2">{match.homeTeamName} – {match.awayTeamName}<span className="ml-2 text-slate-400">#{match.providerFixtureId}</span></td><td className="px-3 py-2 tabular-nums">{match.actualMinute}′</td><td className="px-3 py-2 tabular-nums">{match.score}</td><td className="px-3 py-2 tabular-nums">{match.corners ?? "—"}</td><td className="px-3 py-2 tabular-nums">{match.finalScore}{match.finalCorners ? ` (${match.finalCorners})` : ""}</td><td className="px-3 py-2 tabular-nums">{match.firstPrice} / {match.secondPrice}</td><td className="px-3 py-2"><span className={`${settlementBadgeClass(match.outcome)} rounded px-1.5 py-0.5 font-semibold`}>{match.outcome === "WIN" ? "Thắng" : match.outcome === "LOSS" ? "Thua" : match.outcome === "PUSH" ? "Hòa" : match.outcome === "HALF_WIN" ? "Nửa thắng" : "Nửa thua"}</span></td></tr>)}</tbody></table></div></td></tr>}
+                    </Fragment>;
+                  })}
+                  {footballAnalyticsQuery.isLoading && <tr><td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500">Đang tổng hợp dữ liệu…</td></tr>}
+                  {footballAnalyticsQuery.isError && <tr><td colSpan={9} className="px-4 py-12 text-center text-sm text-rose-700">{footballAnalyticsQuery.error instanceof Error ? footballAnalyticsQuery.error.message : "Không tải được dữ liệu phân tích."}</td></tr>}
+                  {!footballAnalyticsQuery.isLoading && !footballAnalyticsQuery.isError && visibleAnalyticsGroups.length === 0 && <tr><td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500">Chưa có nhóm trùng từ hai trận với điều kiện này.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">Giá Nhà/Tài và Khách/Xỉu đều phải nằm trong mức chênh lệch đã chọn; “Đúng giá” yêu cầu cả hai mức giá trùng nhau.</p>
+          </section>}
+
+          {tab === "history" && <section className="overflow-hidden rounded border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
+              <div>
+                <h2 className="font-semibold text-slate-950">Lịch sử odds đã ghi</h2>
+                <p className="mt-1 text-xs text-slate-500">Các trận có snapshot odds đã lưu; chọn trận để xem lịch sử từng phút.</p>
+              </div>
+              <button onClick={() => void oddsHistoryFixturesQuery.refetch()} className="inline-flex h-9 items-center gap-2 rounded border border-slate-300 px-3 text-xs font-semibold text-slate-700"><RefreshCw size={14} className={oddsHistoryFixturesQuery.isFetching ? "animate-spin" : ""} /> Tải lại</button>
+            </div>
+            <div className="grid gap-3 border-b border-slate-100 p-4 sm:grid-cols-[180px_180px_minmax(220px,1fr)]">
+              <label className="text-xs font-medium text-slate-600">Từ ngày
+                <input type="date" value={historyFrom} onChange={(event) => { setHistoryFrom(event.target.value); setHistoryPage(1); }} className="mt-1 h-9 w-full rounded border border-slate-300 px-2 text-sm" />
+              </label>
+              <label className="text-xs font-medium text-slate-600">Đến ngày
+                <input type="date" value={historyTo} onChange={(event) => { setHistoryTo(event.target.value); setHistoryPage(1); }} className="mt-1 h-9 w-full rounded border border-slate-300 px-2 text-sm" />
+              </label>
+              <label className="text-xs font-medium text-slate-600">Tìm đội
+                <input value={historySearch} onChange={(event) => { setHistorySearch(event.target.value); setHistoryPage(1); }} placeholder="Tên đội bóng" className="mt-1 h-9 w-full rounded border border-slate-300 px-3 text-sm" />
+              </label>
+            </div>
+            <div className="table-scroll overflow-x-auto">
+              <table className="w-full min-w-[760px] text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Trận đấu</th><th className="px-4 py-3">Ngày giờ</th><th className="px-4 py-3">Tỷ số (góc)</th><th className="px-4 py-3 text-right">Snapshots</th><th className="px-4 py-3">Ghi gần nhất</th><th className="px-4 py-3 text-right">Thao tác</th></tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(oddsHistoryFixturesQuery.data?.fixtures ?? []).map((fixture) => <tr key={fixture.id} className="hover:bg-slate-50/70">
+                    <td className="px-4 py-3"><FixtureTeams fixture={fixture} />{fixture.isTestFixture && <span className="mt-1 inline-flex rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">TEST</span>}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{formatFixtureDateTime(fixture.kickoffAt)}</td>
+                    <td className="px-4 py-3 font-semibold tabular-nums">
+                      <div>{fixture.homeScore ?? "—"}-{fixture.awayScore ?? "—"}</div>
+                      {fixture.homeScoreHt != null && fixture.awayScoreHt != null && <div className="mt-0.5 text-xs font-normal text-slate-500">H1 {fixture.homeScoreHt}-{fixture.awayScoreHt}</div>}
+                      <div className="mt-0.5 text-xs font-normal text-slate-500">
+                        {(["FT", "AET", "PEN"].includes(fixture.status) || fixture.homeCornerKicksHt != null || fixture.homeCornerKicksFt != null)
+                          ? `(H1 ${fixture.homeCornerKicksHt != null && fixture.awayCornerKicksHt != null ? `${fixture.homeCornerKicksHt}-${fixture.awayCornerKicksHt}` : "—"} · FT ${fixture.homeCornerKicksFt != null && fixture.awayCornerKicksFt != null ? `${fixture.homeCornerKicksFt}-${fixture.awayCornerKicksFt}` : fixture.latestHomeCornerKicks != null && fixture.latestAwayCornerKicks != null ? `${fixture.latestHomeCornerKicks}-${fixture.latestAwayCornerKicks}` : "—"})`
+                          : fixture.latestHomeCornerKicks != null && fixture.latestAwayCornerKicks != null
+                            ? `(${fixture.latestHomeCornerKicks}-${fixture.latestAwayCornerKicks})`
+                            : "(—)"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">{fixture.snapshotCount}</td>
+                    <td className="px-4 py-3 text-xs text-slate-600">{fixture.lastOddsAt ? formatDate(fixture.lastOddsAt) : "—"}</td>
+                    <td className="px-4 py-3 text-right"><button onClick={() => setSelectedFixtureId(fixture.id)} className="inline-flex h-8 items-center gap-1.5 rounded border border-slate-300 px-2.5 text-xs font-semibold text-slate-700"><Eye size={14} /> Xem odds</button></td>
+                  </tr>)}
+                  {oddsHistoryFixturesQuery.isLoading && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500">Đang tải lịch sử…</td></tr>}
+                  {!oddsHistoryFixturesQuery.isLoading && (oddsHistoryFixturesQuery.data?.fixtures.length ?? 0) === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500">Chưa có trận nào được lưu odds trong khoảng thời gian này.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
+              <span>{oddsHistoryFixturesQuery.data?.total ?? 0} trận đã ghi</span>
+              <div className="flex items-center gap-2">
+                <button disabled={historyPage <= 1 || oddsHistoryFixturesQuery.isFetching} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))} className="h-8 rounded border border-slate-300 px-3 font-semibold disabled:opacity-40">Trước</button>
+                <span>Trang {historyPage} / {Math.max(1, Math.ceil((oddsHistoryFixturesQuery.data?.total ?? 0) / (oddsHistoryFixturesQuery.data?.pageSize ?? 50)))}</span>
+                <button disabled={historyPage >= Math.ceil((oddsHistoryFixturesQuery.data?.total ?? 0) / (oddsHistoryFixturesQuery.data?.pageSize ?? 50)) || oddsHistoryFixturesQuery.isFetching} onClick={() => setHistoryPage((page) => page + 1)} className="h-8 rounded border border-slate-300 px-3 font-semibold disabled:opacity-40">Sau</button>
+              </div>
+            </div>
+          </section>}
+
           {tab === "radar" && (
             <ExternalFixtureRadar
               mode={discoveryMode}
@@ -1151,7 +1450,9 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
               testFixtures={testFixtures}
               selectedFixture={selectedTestFixture}
               result={testResult}
-              markets={normalizedOddsByMarket}
+              markets={normalizedOddsByMarket?.rows ?? []}
+              bookmakerName={normalizedOddsByMarket?.bookmakerName ?? null}
+              dataStatus={normalizedOddsByMarket?.dataStatus ?? null}
               busy={actionPending}
               onFindLive={findLive}
               onSearchFixtures={() => searchTestFixtures(false)}
@@ -1170,6 +1471,8 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
             <LiveRecordingPanel
               trackings={trackingQuery.data ?? []}
               loading={trackingQuery.isLoading}
+              refreshing={trackingQuery.isFetching}
+              onRefresh={() => void trackingQuery.refetch()}
               onView={(fixtureId) => setSelectedFixtureId(fixtureId)}
               onCancel={(trackingId) => actionMutation.mutate({ path: `/api/football/tracking/${trackingId}/cancel` })}
               busy={actionPending}
@@ -1235,7 +1538,7 @@ export default function FootballDashboard({ initialTab = "overview", requiresAdm
 function Header({ onLogout, darkMode, onToggleTheme }: { onLogout?: () => void; darkMode: boolean; onToggleTheme: () => void }) {
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
-      <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
+      <div className="flex w-full items-center justify-between gap-3 px-4 py-3">
         <Link href="/" className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-800">
           <span className="flex h-8 w-8 items-center justify-center rounded border border-teal-200 bg-teal-50 text-teal-800">F</span>
           <span className="truncate">Trading platform <span className="px-1 text-slate-300">/</span> Football</span>
@@ -1401,6 +1704,8 @@ function TestPanel({
   selectedFixture,
   result,
   markets,
+  bookmakerName,
+  dataStatus,
   busy,
   onFindLive,
   onSearchFixtures,
@@ -1416,7 +1721,9 @@ function TestPanel({
   testFixtures: Fixture[];
   selectedFixture: Fixture | null;
   result: { raw: unknown; normalized: { values: OddsValue[] } } | null;
-  markets: Array<[string, OddsValue[]]>;
+  markets: Array<[string, string | null, string | null, string | null]>;
+  bookmakerName: string | null;
+  dataStatus: string | null;
   busy: boolean;
   onFindLive: () => void;
   onSearchFixtures: () => void;
@@ -1458,79 +1765,66 @@ function TestPanel({
 
     <section className="min-h-[560px] rounded border border-slate-200 bg-white">
       <div className="flex flex-col gap-3 border-b border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div><h2 className="font-semibold text-slate-950">Live odds response</h2><p className="mt-1 text-xs text-slate-500">Markets hiển thị theo payload thực tế; response raw được giữ để đối chiếu.</p></div>
+        <div><h2 className="font-semibold text-slate-950">Live odds response</h2><p className="mt-1 text-xs text-slate-500">Chỉ hiển thị AH / OU H1 và FT đã nhận diện.</p></div>
         {result && <button onClick={onSaveSnapshot} disabled={busy || !hasOdds} className="inline-flex h-9 items-center justify-center gap-2 rounded bg-teal-700 px-3 text-sm font-semibold text-white"><Database size={15} /> Save Snapshot</button>}
       </div>
       {!result ? <div className="flex min-h-[480px] flex-col items-center justify-center px-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded border border-slate-200 bg-slate-50 text-slate-500"><Activity size={20} /></div><p className="mt-3 text-sm font-semibold text-slate-700">Chưa có dữ liệu odds</p><p className="mt-1 max-w-md text-xs leading-5 text-slate-500">Chọn trận live hoặc nhập fixture ID để gọi API. Mỗi request đều đi qua quota manager và được ghi log.</p></div> : <div className="space-y-5 p-4">
         <div className={`rounded border p-3 text-sm ${hasOdds ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
-          {hasOdds ? `Đã parse ${result.normalized.values.length} lựa chọn odds.` : "Provider trả response rỗng hoặc chưa có market odds cho fixture này. Đây không được xem là lỗi hệ thống."}
+          {hasOdds ? "Đã nhận odds từ provider." : "Provider trả response rỗng hoặc chưa có market odds cho fixture này. Đây không được xem là lỗi hệ thống."}
         </div>
-        {markets.map(([market, values]) => <div key={market} className="overflow-hidden rounded border border-slate-200">
-          <div className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2"><h3 className="text-sm font-semibold text-slate-800">{market}</h3><span className="text-xs text-slate-500">Bet #{values[0]?.providerBetId}</span></div>
-          <div className="table-scroll overflow-x-auto"><table className="w-full min-w-[520px] text-sm">
-            <thead className="text-xs text-slate-500"><tr><th className="px-3 py-2 text-left font-medium">Bookmaker</th><th className="px-3 py-2 text-left font-medium">Selection</th><th className="px-3 py-2 text-right font-medium">Odds</th><th className="px-3 py-2 text-right font-medium">Trạng thái</th></tr></thead>
-            <tbody className="divide-y divide-slate-100">{values.map((value, index) => <tr key={`${value.providerBetId}-${value.bookmakerId}-${value.selectionName}-${index}`}><td className="px-3 py-2 text-slate-600">{value.bookmakerName ?? "—"}{value.bookmakerId ? ` · #${value.bookmakerId}` : ""}</td><td className="px-3 py-2 font-medium text-slate-800">{value.selectionName}{value.main ? <span className="ml-2 rounded border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-semibold text-teal-800">MAIN</span> : null}</td><td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-950">{value.oddValue}</td><td className="px-3 py-2 text-right text-xs text-slate-500">{[value.blocked && "blocked", value.stopped && "stopped", value.suspended && "suspended", value.finished && "finished"].filter(Boolean).join(" · ") || "active"}</td></tr>)}</tbody>
-          </table></div>
-        </div>)}
-        <details className="rounded border border-slate-200">
-          <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-3 text-sm font-semibold text-slate-700"><span>Raw JSON response</span><ChevronDown size={16} /></summary>
-          <pre className="table-scroll max-h-[420px] overflow-auto border-t border-slate-200 bg-slate-50 p-3 text-[11px] leading-5 text-slate-700">{JSON.stringify(result.raw, null, 2)}</pre>
-        </details>
+        <section className="overflow-hidden rounded border border-slate-200">
+          <div className="flex flex-wrap justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"><span>Bookmaker: <strong className="text-slate-800">{bookmakerName ?? "—"}</strong></span><span>Data: <strong className="text-slate-800">{dataStatus ?? "—"}</strong></span></div>
+          <table className="w-full text-sm"><thead className="text-xs text-slate-500"><tr><th className="px-3 py-2 text-left font-medium">Kèo</th><th className="px-3 py-2 text-left font-medium">Line</th><th className="px-3 py-2 text-right font-medium">Nhà / Over</th><th className="px-3 py-2 text-right font-medium">Khách / Under</th></tr></thead>
+            <tbody className="divide-y divide-slate-100">{markets.map(([market, line, firstPrice, secondPrice]) => <tr key={market}><td className="px-3 py-2 font-semibold text-slate-800">{market}</td><td className="px-3 py-2 tabular-nums text-slate-700">{line ?? "—"}</td><td className="px-3 py-2 text-right tabular-nums text-slate-800">{firstPrice ?? "—"}</td><td className="px-3 py-2 text-right tabular-nums text-slate-800">{secondPrice ?? "—"}</td></tr>)}</tbody>
+          </table>
+        </section>
       </div>}
     </section>
   </div>;
 }
 
-function LiveRecordingPanel({ trackings, loading, onView, onCancel, busy }: {
+function LiveRecordingPanel({ trackings, loading, refreshing, onRefresh, onView, onCancel, busy }: {
   trackings: TrackingRow[];
   loading: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
   onView: (fixtureId: string) => void;
   onCancel: (trackingId: string) => void;
   busy: boolean;
 }) {
-  return <section className="rounded border border-slate-200 bg-white">
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-4">
-      <div><h2 className="font-semibold text-slate-950">Live Recording</h2><p className="mt-1 text-xs text-slate-500">Tự refresh mỗi 15 giây. Trạng thái, phút và tỉ số lấy từ fixture provider đã đồng bộ.</p></div>
-      <span className="rounded border border-teal-200 bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-800">{trackings.filter((item) => item.status === "RECORDING").length} đang ghi</span>
+  return <section className="overflow-hidden rounded border border-slate-200 bg-white">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
+      <div><h2 className="font-semibold text-slate-950">Live Recording</h2><p className="mt-1 text-xs text-slate-500">Tự refresh mỗi 15 giây. {trackings.filter((item) => item.status === "RECORDING").length} trận đang ghi.</p></div>
+      <button onClick={onRefresh} className="inline-flex h-9 items-center gap-2 rounded border border-slate-300 px-3 text-xs font-semibold text-slate-700"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Tải lại</button>
     </div>
-    <div className="hidden border-b border-slate-100 bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500 lg:grid lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_232px] lg:items-center lg:gap-3">
-      <span>Trận đấu</span>
-      <div className="grid grid-cols-3 gap-2">
-        <span>Snapshots</span>
-        <span>Thiếu / bỏ lỡ</span>
-        <span>Mốc gần nhất</span>
-      </div>
-      <span className="text-right">Thao tác</span>
-    </div>
-    <div className="divide-y divide-slate-100">
-      {trackings.map((tracking) => <article key={tracking.id} className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_232px] lg:items-center">
-        <div>
-          <div className="flex flex-wrap items-center gap-2"><span className="rounded border border-teal-200 bg-teal-50 px-2 py-0.5 text-[10px] font-bold text-teal-800">{tracking.fixture.league?.shortName ?? getFootballLeague(tracking.fixture.providerLeagueId)?.shortName ?? `ID ${tracking.fixture.providerLeagueId}`}</span><span className={`rounded border px-2 py-0.5 text-[10px] font-semibold ${statusClass(tracking.status === "RECORDING" ? tracking.fixture.status : tracking.status)}`}>{tracking.status}</span></div>
-          <button onClick={() => onView(tracking.fixture.id)} className="mt-2 text-left text-sm font-semibold text-slate-900 hover:text-teal-800">{tracking.fixture.homeTeamName} {tracking.fixture.homeScore ?? "—"} – {tracking.fixture.awayScore ?? "—"} {tracking.fixture.awayTeamName}</button>
-          <p className="mt-1 text-xs text-slate-500">{formatTrackingMinute(tracking.fixture) ? `${formatTrackingMinute(tracking.fixture)} · ` : ""}<span className={isUpcomingBeforeTomorrowMorning(tracking.fixture.kickoffAt) ? "font-semibold text-amber-600" : undefined}>{formatFixtureDateTime(tracking.fixture.kickoffAt)}</span> · Fixture #{tracking.fixture.providerFixtureId}</p>
-        </div>
-        <div className="grid grid-cols-3 gap-2 text-xs">
-          <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 lg:hidden">Snapshots</p>
-            <p className="mt-1 font-semibold text-slate-800 lg:mt-0">{tracking.snapshotCount}</p>
-          </div>
-          <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 lg:hidden">Thiếu / bỏ lỡ</p>
-            <p className="mt-1 font-semibold text-slate-800 lg:mt-0">{tracking.missingSnapshotCount}</p>
-          </div>
-          <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 lg:border-0 lg:bg-transparent lg:px-0 lg:py-0">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 lg:hidden">Mốc gần nhất</p>
-            <p className="mt-1 truncate font-semibold text-slate-800 lg:mt-0" title={tracking.lastSlot ? `${tracking.lastSlot.slotKey} · ${tracking.lastSlot.status}` : "Chưa có"}>{tracking.lastSlot ? `${tracking.lastSlot.slotKey} · ${tracking.lastSlot.status}` : "Chưa có"}</p>
-          </div>
-        </div>
-        <div className="flex gap-2 lg:justify-end">
-          <button onClick={() => onView(tracking.fixture.id)} className="inline-flex h-9 items-center gap-1.5 rounded border border-slate-300 px-3 text-xs font-semibold text-slate-700"><Eye size={14} /> Odds History</button>
-          <button onClick={() => onCancel(tracking.id)} disabled={busy} className="h-9 rounded border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-700 disabled:opacity-50">Dừng theo dõi</button>
-        </div>
-        {tracking.lastError && <p className="rounded border border-rose-200 bg-rose-50 p-2 text-xs text-rose-700 lg:col-span-3">{tracking.lastError}</p>}
-      </article>)}
-      {loading && <p className="p-12 text-center text-sm text-slate-500">Đang tải tracking…</p>}
-      {!loading && !trackings.length && <p className="p-12 text-center text-sm text-slate-500">Chưa có trận nào được bật Live Tracking. Mở Trận đấu hoặc Kiểm tra API để chọn trận.</p>}
+    <div className="table-scroll overflow-x-auto">
+      <table className="w-full min-w-[900px] text-left text-sm">
+        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Trận đấu</th><th className="px-4 py-3">Ngày giờ</th><th className="px-4 py-3">Tỷ số (góc)</th><th className="px-4 py-3 text-right">Snapshots</th><th className="px-4 py-3">Ghi gần nhất</th><th className="px-4 py-3 text-right">Thao tác</th></tr></thead>
+        <tbody className="divide-y divide-slate-100">
+          {trackings.map((tracking) => <Fragment key={tracking.id}>
+            <tr className="hover:bg-slate-50/70">
+              <td className="px-4 py-3"><FixtureTeams fixture={tracking.fixture} />
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(tracking.status === "RECORDING" ? tracking.fixture.status : tracking.status)}`}>{tracking.status}</span>
+                  <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${statusClass(tracking.fixture.status)}`}>{statusLabel(tracking.fixture.status)}{formatTrackingMinute(tracking.fixture) ? ` · ${formatTrackingMinute(tracking.fixture)}′` : ""}</span>
+                </div>
+                <p className="mt-1 text-[10px] text-slate-400">Fixture #{tracking.fixture.providerFixtureId}</p>
+              </td>
+              <td className="px-4 py-3 text-sm text-slate-600">{formatFixtureDateTime(tracking.fixture.kickoffAt)}</td>
+              <td className="px-4 py-3 font-semibold tabular-nums">
+                <div>{tracking.fixture.homeScore ?? "—"}-{tracking.fixture.awayScore ?? "—"}</div>
+                <div className="mt-0.5 text-xs font-normal text-slate-500">{tracking.latestHomeCornerKicks != null && tracking.latestAwayCornerKicks != null ? `(${tracking.latestHomeCornerKicks}-${tracking.latestAwayCornerKicks})` : "(—)"}</div>
+              </td>
+              <td className="px-4 py-3 text-right tabular-nums"><div>{tracking.snapshotCount}</div><div className="mt-0.5 text-xs font-normal text-slate-500">Thiếu / bỏ lỡ: {tracking.missingSnapshotCount}</div></td>
+              <td className="px-4 py-3 text-xs text-slate-600"><div>{tracking.latestOddsAt ? formatDate(tracking.latestOddsAt) : "—"}</div><div className="mt-0.5 text-slate-400">{tracking.lastSlot ? `${tracking.lastSlot.slotKey} · ${tracking.lastSlot.status}` : "Chưa có mốc"}</div></td>
+              <td className="px-4 py-3 text-right"><div className="flex flex-wrap justify-end gap-2"><button onClick={() => onView(tracking.fixture.id)} className="inline-flex h-8 items-center gap-1.5 rounded border border-slate-300 px-2.5 text-xs font-semibold text-slate-700"><Eye size={14} /> Xem odds</button><button onClick={() => onCancel(tracking.id)} disabled={busy} className="h-8 rounded border border-rose-200 bg-rose-50 px-2.5 text-xs font-semibold text-rose-700 disabled:opacity-50">Dừng theo dõi</button></div></td>
+            </tr>
+            {tracking.lastError && <tr><td colSpan={6} className="px-4 pb-3 pt-0"><p className="rounded border border-rose-200 bg-rose-50 p-2 text-xs text-rose-700">{tracking.lastError}</p></td></tr>}
+          </Fragment>)}
+          {loading && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500">Đang tải tracking…</td></tr>}
+          {!loading && !trackings.length && <tr><td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500">Chưa có trận nào được bật Live Tracking. Mở Trận đấu hoặc Live Radar để chọn trận; odds đã lưu có thể xem tại Lịch sử odds.</td></tr>}
+        </tbody>
+      </table>
     </div>
   </section>;
 }
@@ -1651,7 +1945,7 @@ function SettingsPanel({
         </label>
         <label className="text-sm font-medium text-slate-700">Odds snapshot interval (minutes)
           <select value={draft.oddsIntervalMinutes} onChange={(event) => setDraft({ ...draft, oddsIntervalMinutes: Number(event.target.value) })} className="mt-1.5 h-10 w-full rounded border border-slate-300 bg-white px-3 text-sm">
-            {[5, 10, 15].map((minutes) => <option key={minutes} value={minutes}>{minutes} phút</option>)}
+            {[1, 5, 10, 15].map((minutes) => <option key={minutes} value={minutes}>{minutes} phút{minutes === 1 ? " · kiểm thử" : ""}</option>)}
           </select>
         </label>
         <label className="text-sm font-medium text-slate-700">Fixture sync interval (hours)
@@ -1744,40 +2038,104 @@ function LogsPanel({ logs, collectorLogs, loading }: { logs: Array<Record<string
 }
 
 function FixtureDetailModal({ fixture, loading, error, onClose }: { fixture?: FixtureDetails; loading: boolean; error: string; onClose: () => void }) {
+  const [showOddsChart, setShowOddsChart] = useState(false);
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+    };
+  }, []);
+
   const snapshots = fixture?.oddsSnapshots ?? [];
-  const firstMarkets = snapshots[0]?.values ?? [];
-  const chartKeys = Array.from(new Set(firstMarkets.map((value) => `${value.betName} / ${value.selectionName}`))).slice(0, 3);
-  const marketCell = (line: string | number | null, first: string | number | null, second: string | number | null) =>
-    line === null && first === null && second === null ? "—" : `${line ?? "—"} · ${first ?? "—"} / ${second ?? "—"}`;
-  const chartData = [...snapshots].reverse().map((snapshot) => {
+  const historySnapshots = [...snapshots].sort((a, b) => {
+    if (a.sourceType === "PREMATCH" && b.sourceType !== "PREMATCH") return 1;
+    if (b.sourceType === "PREMATCH" && a.sourceType !== "PREMATCH") return -1;
+    return new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime();
+  });
+  const chartMarkets = [
+    { key: "ahFtHome", label: "AH FT · Nhà", lineField: "ahFtLine", priceField: "ahFtHomePrice", color: "#0f766e" },
+    { key: "ahFtAway", label: "AH FT · Khách", lineField: "ahFtLine", priceField: "ahFtAwayPrice", color: "#2563eb" },
+    { key: "ouFtOver", label: "OU FT · Tài", lineField: "ouFtLine", priceField: "ouFtOverPrice", color: "#d97706" },
+    { key: "ouFtUnder", label: "OU FT · Xỉu", lineField: "ouFtLine", priceField: "ouFtUnderPrice", color: "#db2777" },
+    { key: "cornerAhHtHome", label: "AH góc H1 · Nhà", lineField: "cornerAhHtLine", priceField: "cornerAhHtHomePrice", color: "#0e7490" },
+    { key: "cornerAhHtAway", label: "AH góc H1 · Khách", lineField: "cornerAhHtLine", priceField: "cornerAhHtAwayPrice", color: "#6d28d9" },
+    { key: "cornerOuHtOver", label: "OU góc H1 · Tài", lineField: "cornerOuHtLine", priceField: "cornerOuHtOverPrice", color: "#c2410c" },
+    { key: "cornerOuHtUnder", label: "OU góc H1 · Xỉu", lineField: "cornerOuHtLine", priceField: "cornerOuHtUnderPrice", color: "#be185d" },
+    { key: "cornerAhFtHome", label: "AH góc FT · Nhà", lineField: "cornerAhFtLine", priceField: "cornerAhFtHomePrice", color: "#0891b2" },
+    { key: "cornerAhFtAway", label: "AH góc FT · Khách", lineField: "cornerAhFtLine", priceField: "cornerAhFtAwayPrice", color: "#7c3aed" },
+    { key: "cornerOuFtOver", label: "OU góc FT · Tài", lineField: "cornerOuFtLine", priceField: "cornerOuFtOverPrice", color: "#ea580c" },
+    { key: "cornerOuFtUnder", label: "OU góc FT · Xỉu", lineField: "cornerOuFtLine", priceField: "cornerOuFtUnderPrice", color: "#be185d" },
+  ] as const;
+  const orderedSnapshots = [...snapshots].reverse();
+  const chartSeries = chartMarkets.flatMap((market) => {
+    const lines = Array.from(new Set(orderedSnapshots
+      .map((snapshot) => snapshot[market.lineField])
+      .filter((line): line is string | number => line !== null)
+      .map(String)));
+    return lines.map((line) => ({
+      dataKey: `${market.key}_${line.replace(/[^a-z0-9]+/gi, "_")}`,
+      marketKey: market.key,
+      line,
+      name: `${market.label} · line ${line}`,
+      color: market.color,
+    }));
+  });
+  const marketCell = (
+    line: string | number | null,
+    first: string | number | null,
+    second: string | number | null,
+    firstOutcome?: SettlementStatus,
+    secondOutcome?: SettlementStatus,
+    handicapLine = false,
+  ) => {
+    if (line === null && first === null && second === null) return "—";
+    const displayLine = handicapLine ? formatHandicapLine(line) : line === null ? "—" : String(line);
+    const priceClass = (outcome?: SettlementStatus) => outcome
+      ? `${settlementBadgeClass(outcome)} rounded px-0.5 py-px`
+      : "";
+    return <span className="whitespace-nowrap" title={handicapLine ? "Line nhà cái cho cửa Nhà: âm là Nhà chấp, dương là Nhà được chấp." : undefined}>{displayLine} - <span className={priceClass(firstOutcome)}>{first ?? "—"}</span> / <span className={priceClass(secondOutcome)}>{second ?? "—"}</span></span>;
+  };
+  const chartData = orderedSnapshots.map((snapshot) => {
     const row: Record<string, string | number> = { time: new Date(snapshot.capturedAt).getTime() };
-    for (const key of chartKeys) {
-      const [betName, selectionName] = key.split(" / ");
-      const value = snapshot.values.find((item) => item.betName === betName && item.selectionName === selectionName && Number.isFinite(Number(item.oddValue)));
-      if (value) row[key] = Number(value.oddValue);
+    for (const series of chartSeries) {
+      const market = chartMarkets.find((item) => item.key === series.marketKey);
+      if (!market || String(snapshot[market.lineField] ?? "") !== series.line) continue;
+      const price = snapshot[market.priceField];
+      const numericPrice = Number(price);
+      if (price !== null && Number.isFinite(numericPrice) && numericPrice > 1) row[series.dataKey] = numericPrice;
     }
     return row;
   });
-  const colors = ["#0f766e", "#2563eb", "#d97706"];
+  const chartPointCount = chartData.filter((row) => chartSeries.some((series) => typeof row[series.dataKey] === "number")).length;
 
-  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40 sm:items-center sm:p-6" role="dialog" aria-modal="true" aria-label="Fixture details">
-    <div className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-t border border-slate-200 bg-white shadow-xl sm:rounded">
-      <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-slate-200 bg-white p-4">
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Fixture details">
+    <div className="max-h-[calc(100vh-2rem)] w-full max-w-none overflow-y-auto rounded border border-slate-200 bg-white shadow-xl">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white p-4">
         <div>{fixture ? <><FixtureTeams fixture={fixture} /><p className="mt-2 text-xs text-slate-500">Fixture #{fixture.providerFixtureId} · Kickoff {formatDate(fixture.kickoffAt, { timeZone: "Asia/Ho_Chi_Minh" })}</p></> : <h2 className="font-semibold">Fixture detail</h2>}</div>
         <button onClick={onClose} aria-label="Close" className="flex h-8 w-8 items-center justify-center rounded border border-slate-300 text-slate-600"><X size={16} /></button>
       </div>
-      {loading ? <div className="p-12 text-center text-sm text-slate-500">Đang tải fixture…</div> : error ? <div className="p-4 text-sm text-rose-700">{error}</div> : fixture ? <div className="space-y-5 p-4 sm:p-5">
+      {loading ? <div className="p-12 text-center text-sm text-slate-500">Đang tải fixture…</div> : error ? <div className="p-4 text-sm text-rose-700">{error}</div> : fixture ? <div className="space-y-5 p-2 sm:p-3">
         <div className="grid gap-3 sm:grid-cols-4"><MiniStat label="Trạng thái" value={`${statusLabel(fixture.status)} (${fixture.status})`} /><MiniStat label="Tỷ số" value={`${fixture.homeScore ?? "—"} : ${fixture.awayScore ?? "—"}`} /><MiniStat label="Elapsed" value={fixture.elapsedMinute ? `${fixture.elapsedMinute}′` : "—"} /><MiniStat label="Snapshots" value={String(snapshots.length)} /></div>
-        <section className="rounded border border-slate-200 p-4"><div className="flex items-center justify-between gap-2"><div><h3 className="font-semibold text-slate-900">Biến động odds</h3><p className="mt-1 text-xs text-slate-500">Biểu đồ không nối qua snapshot hoặc market bị thiếu.</p></div><span className="text-xs text-slate-500">{snapshots.length} điểm ghi nhận</span></div>
-          {chartKeys.length && chartData.length ? <div className="mt-3 h-64 w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}><CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" /><XAxis dataKey="time" tick={{ fontSize: 11 }} tickFormatter={(value) => formatDate(new Date(value).toISOString(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} /><YAxis domain={["auto", "auto"]} tick={{ fontSize: 11 }} /><Tooltip labelFormatter={(value) => formatDate(new Date(Number(value)).toISOString())} />{chartKeys.map((key, index) => <Line key={key} type="monotone" dataKey={key} name={key} stroke={colors[index]} strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />)}</LineChart></ResponsiveContainer></div> : <p className="py-10 text-center text-sm text-slate-500">Chưa đủ snapshot numeric để vẽ biểu đồ.</p>}
-          <div className="mt-2 flex flex-wrap gap-3">{chartKeys.map((key, index) => <span key={key} className="inline-flex items-center gap-1.5 text-xs text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: colors[index] }} />{key}</span>)}</div>
+        <section className="rounded border border-slate-200 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-semibold text-slate-900">Biến động odds · AH / OU FT và góc</h3>
+            <button type="button" onClick={() => setShowOddsChart((visible) => !visible)} aria-expanded={showOddsChart} className="h-8 shrink-0 rounded border border-slate-300 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              {showOddsChart ? "Ẩn biểu đồ" : "Xem biểu đồ"}
+            </button>
+          </div>
+          {showOddsChart && <>
+            <p className="mt-2 text-xs text-slate-500">Bi&#7875;u &#273;&#7891; g&#7891;m AH, OU hi&#7879;p 1 v&#224; c&#7843; tr&#7853;n, c&#249;ng k&#232;o g&#243;c hi&#7879;p 1 v&#224; c&#7843; tr&#7853;n; m&#7895;i m&#7889;c hi&#7875;n th&#7883; ri&#234;ng. {chartPointCount} &#273;i&#7875;m c&#243; odds.</p>
+            {chartSeries.length && chartPointCount ? <div className="mt-3 h-64 w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}><CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" /><XAxis dataKey="time" tick={{ fontSize: 11 }} tickFormatter={(value) => formatDate(new Date(value).toISOString(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} /><YAxis domain={["auto", "auto"]} tick={{ fontSize: 11 }} /><Tooltip labelFormatter={(value) => formatDate(new Date(Number(value)).toISOString())} />{chartSeries.map((series) => <Line key={series.dataKey} type="monotone" dataKey={series.dataKey} name={series.name} stroke={series.color} strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />)}</LineChart></ResponsiveContainer></div> : <p className="py-10 text-center text-sm text-slate-500">Ch&#432;a c&#243; snapshot numeric cho c&#225;c k&#232;o AH / OU / g&#243;c.</p>}
+            <div className="mt-2 flex flex-wrap gap-3">{chartSeries.map((series) => <span key={series.dataKey} className="inline-flex items-center gap-1.5 text-xs text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: series.color }} />{series.name}</span>)}</div>
+          </>}
         </section>
-        <section className="overflow-hidden rounded border border-slate-200"><div className="border-b border-slate-200 px-3 py-2"><h3 className="text-sm font-semibold text-slate-900">Odds History · AH / OU</h3><p className="mt-1 text-xs text-slate-500">Line · odds hai phía; target và actual minute được giữ riêng.</p></div><div className="table-scroll overflow-x-auto"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-3 py-2">Slot</th><th className="px-3 py-2">Phút thực</th><th className="px-3 py-2">Tỷ số</th><th className="px-3 py-2">AH H1 · line / nhà / khách</th><th className="px-3 py-2">AH FT · line / nhà / khách</th><th className="px-3 py-2">OU H1 · line / over / under</th><th className="px-3 py-2">OU FT · line / over / under</th><th className="px-3 py-2">Bookmaker</th><th className="px-3 py-2">Data</th></tr></thead><tbody className="divide-y divide-slate-100">{snapshots.map((snapshot) => <tr key={snapshot.id}><td className="px-3 py-2 font-semibold text-slate-800">{snapshot.slotKey ?? snapshot.period ?? "—"} · target {snapshot.targetMinute ?? "—"}</td><td className="px-3 py-2 tabular-nums">{snapshot.actualMinute ?? "—"}′</td><td className="px-3 py-2 tabular-nums">{snapshot.homeScore ?? "—"} : {snapshot.awayScore ?? "—"}</td><td className="px-3 py-2 tabular-nums">{marketCell(snapshot.ahHtLine, snapshot.ahHtHomePrice, snapshot.ahHtAwayPrice)}</td><td className="px-3 py-2 tabular-nums">{marketCell(snapshot.ahFtLine, snapshot.ahFtHomePrice, snapshot.ahFtAwayPrice)}</td><td className="px-3 py-2 tabular-nums">{marketCell(snapshot.ouHtLine, snapshot.ouHtOverPrice, snapshot.ouHtUnderPrice)}</td><td className="px-3 py-2 tabular-nums">{marketCell(snapshot.ouFtLine, snapshot.ouFtOverPrice, snapshot.ouFtUnderPrice)}</td><td className="px-3 py-2">{snapshot.bookmakerName ?? "—"}</td><td className="px-3 py-2">{snapshot.dataStatus ?? "—"}</td></tr>)}</tbody></table></div></section>
-        {snapshots.map((snapshot) => <section key={snapshot.id} className="overflow-hidden rounded border border-slate-200">
-          <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-3 py-2"><div className="text-sm font-semibold text-slate-800">Snapshot · {formatDate(snapshot.capturedAt)}</div><span className={`rounded border px-2 py-0.5 text-[10px] font-semibold ${snapshot.isTest ? "border-amber-200 bg-amber-50 text-amber-800" : "border-teal-200 bg-teal-50 text-teal-800"}`}>{snapshot.isTest ? "TEST" : "LIVE"}</span></div>
-          {snapshot.values.length ? <div className="table-scroll overflow-x-auto"><table className="w-full min-w-[580px] text-sm"><thead className="text-xs text-slate-500"><tr><th className="px-3 py-2 text-left font-medium">Market</th><th className="px-3 py-2 text-left font-medium">Bookmaker</th><th className="px-3 py-2 text-left font-medium">Selection</th><th className="px-3 py-2 text-right font-medium">Odds</th><th className="px-3 py-2 text-right font-medium">State</th></tr></thead><tbody className="divide-y divide-slate-100">{snapshot.values.map((value) => <tr key={value.id}><td className="px-3 py-2 text-slate-700">{value.betName}</td><td className="px-3 py-2 text-slate-600">{value.bookmakerName ?? "—"}</td><td className="px-3 py-2 text-slate-700">{value.selectionName}</td><td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900">{value.oddValue}</td><td className="px-3 py-2 text-right text-xs text-slate-500">{[value.blocked && "blocked", value.stopped && "stopped", value.suspended && "suspended", value.finished && "finished"].filter(Boolean).join(" · ") || "active"}</td></tr>)}</tbody></table></div> : <p className="p-4 text-sm text-slate-500">Snapshot được lưu nhưng response chưa có market value đã nhận diện.</p>}
-          <details className="border-t border-slate-200"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-600">Xem raw JSON</summary><pre className="table-scroll max-h-64 overflow-auto bg-slate-50 p-3 text-[11px] leading-5">{JSON.stringify(snapshot.rawJson, null, 2)}</pre></details>
-        </section>)}
+        <section className="overflow-hidden rounded border border-slate-200"><div className="border-b border-slate-200 px-1.5 py-2"><h3 className="text-sm font-semibold text-slate-900">Odds History · AH / OU / Góc</h3><p className="mt-1 text-xs text-slate-500">K&#232;o ch&#226;u &#193; v&#224; T&#224;i/X&#7881;u hi&#7875;n th&#7883; m&#7889;c / gi&#225; hai c&#7917;a; k&#232;o g&#243;c g&#7891;m hi&#7879;p 1 v&#224; c&#7843; tr&#7853;n.</p></div><div className="table-scroll overflow-x-auto"><table className="w-full min-w-[1600px] table-fixed text-xs"><colgroup><col style={{ width: "calc(7.514450867052% - 4.208092485549px)" }} /><col style={{ width: "calc(5.780346820809% - 3.236994219653px)" }} /><col style={{ width: "calc(5.780346820809% - 3.236994219653px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "16px" }} /><col style={{ width: "calc(6.936416184971% - 3.884393063584px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "calc(9.248554913295% - 5.179190751445px)" }} /><col style={{ width: "40px" }} /></colgroup><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-1.5 py-2">Slot</th><th className="px-1.5 py-2">Ph&#250;t th&#7921;c</th><th className="px-1.5 py-2"><strong>T&#7927; s&#7889;</strong><br /><span className="font-normal normal-case">Nh&#224; : kh&#225;ch</span></th><th className="px-1.5 py-2"><strong>Ch&#7845;p H1</strong><br /><span className="font-normal normal-case">Ch&#7845;p - Nh&#224;/Kh&#225;ch</span></th><th className="px-1.5 py-2"><strong>T&#224;i/X&#7881;u H1</strong><br /><span className="font-normal normal-case">TX - T&#224;i/X&#7881;u</span></th><th className="px-1.5 py-2"><strong>Ch&#7845;p c&#7843; tr&#7853;n</strong><br /><span className="font-normal normal-case">Ch&#7845;p - Nh&#224;/Kh&#225;ch</span></th><th className="px-1.5 py-2"><strong>T&#224;i/X&#7881;u c&#7843; tr&#7853;n</strong><br /><span className="font-normal normal-case">TX - T&#224;i/X&#7881;u</span></th><th className="px-0 py-2" aria-hidden="true"></th><th className="px-1.5 py-2" title="S&#7889; ph&#7841;t g&#243;c &#273;&#7897;i nh&#224; : &#273;&#7897;i kh&#225;ch t&#7841;i th&#7901;i &#273;i&#7875;m snapshot">G&#243;c hi&#7879;n t&#7841;i<br /><span className="font-normal normal-case">Nh&#224; : kh&#225;ch</span></th><th className="px-1.5 py-2"><strong>Ch&#7845;p g&#243;c H1</strong><br /><span className="font-normal normal-case">Ch&#7845;p - Nh&#224;/Kh&#225;ch</span></th><th className="px-1.5 py-2"><strong>T&#224;i/X&#7881;u g&#243;c H1</strong><br /><span className="font-normal normal-case">TX - T&#224;i/X&#7881;u</span></th><th className="px-1.5 py-2"><strong>Ch&#7845;p g&#243;c c&#7843; tr&#7853;n</strong><br /><span className="font-normal normal-case">Ch&#7845;p - Nh&#224;/Kh&#225;ch</span></th><th className="sticky right-10 top-auto bottom-auto z-20 bg-slate-50 px-1.5 py-2"><strong>T&#224;i/X&#7881;u g&#243;c c&#7843; tr&#7853;n</strong><br /><span className="font-normal normal-case">TX - T&#224;i/X&#7881;u</span></th><th style={{ width: "40px", minWidth: "40px", maxWidth: "40px", boxSizing: "border-box" }} className="sticky right-0 top-auto bottom-auto z-30 w-10 min-w-10 max-w-10 border-l border-slate-200 bg-slate-50 px-1 py-2 text-center">Data</th></tr></thead><tbody className="divide-y divide-slate-100">{historySnapshots.map((snapshot) => <tr key={snapshot.id}><td className="px-1.5 py-2 font-semibold text-slate-800">{snapshot.sourceType === "PREMATCH" ? "PRE-MATCH -10'" : `${snapshot.slotKey ?? snapshot.period ?? "—"} · target ${snapshot.targetMinute ?? "—"}`}</td><td className="px-1.5 py-2 text-center tabular-nums">{snapshot.actualMinute ?? "—"}′</td><td className="px-1.5 py-2 tabular-nums">{snapshot.homeScore ?? "—"} : {snapshot.awayScore ?? "—"}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.ahHtLine, snapshot.ahHtHomePrice, snapshot.ahHtAwayPrice, snapshot.settlementData?.ahHtHome, snapshot.settlementData?.ahHtAway, true)}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.ouHtLine, snapshot.ouHtOverPrice, snapshot.ouHtUnderPrice, snapshot.settlementData?.ouHtOver, snapshot.settlementData?.ouHtUnder)}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.ahFtLine, snapshot.ahFtHomePrice, snapshot.ahFtAwayPrice, snapshot.settlementData?.ahFtHome, snapshot.settlementData?.ahFtAway, true)}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.ouFtLine, snapshot.ouFtOverPrice, snapshot.ouFtUnderPrice, snapshot.settlementData?.ouFtOver, snapshot.settlementData?.ouFtUnder)}</td><td className="px-0 py-2" aria-hidden="true"></td><td className="px-1.5 py-2 tabular-nums" title="Phạt góc đội nhà : đội khách">{snapshot.homeCornerKicks ?? "—"} : {snapshot.awayCornerKicks ?? "—"}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.cornerAhHtLine, snapshot.cornerAhHtHomePrice, snapshot.cornerAhHtAwayPrice, snapshot.settlementData?.cornerAhHtHome, snapshot.settlementData?.cornerAhHtAway, true)}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.cornerOuHtLine, snapshot.cornerOuHtOverPrice, snapshot.cornerOuHtUnderPrice, snapshot.settlementData?.cornerOuHtOver, snapshot.settlementData?.cornerOuHtUnder)}</td><td className="px-1.5 py-2 tabular-nums">{marketCell(snapshot.cornerAhFtLine, snapshot.cornerAhFtHomePrice, snapshot.cornerAhFtAwayPrice, snapshot.settlementData?.cornerAhFtHome, snapshot.settlementData?.cornerAhFtAway, true)}</td><td className="sticky right-10 top-auto bottom-auto z-10 bg-white px-1.5 py-2 tabular-nums">{marketCell(snapshot.cornerOuFtLine, snapshot.cornerOuFtOverPrice, snapshot.cornerOuFtUnderPrice, snapshot.settlementData?.cornerOuFtOver, snapshot.settlementData?.cornerOuFtUnder)}</td><td style={{ width: "40px", minWidth: "40px", maxWidth: "40px", boxSizing: "border-box" }} className="sticky right-0 top-auto bottom-auto z-20 w-10 min-w-10 max-w-10 overflow-hidden border-l border-slate-200 bg-white px-1 py-2 text-center font-semibold" title={snapshot.dataStatus ?? ""} aria-label={snapshot.dataStatus ?? "No data status"}>{snapshot.dataStatus ? snapshot.dataStatus.slice(0, 1).toUpperCase() : "—"}</td></tr>)}</tbody></table></div></section>
         <p className="rounded border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">Các giá trị trong bảng là giá kèo do provider trả về, không phải xác suất người chơi đặt cược. Nội dung market được giữ theo tên và cấu trúc nguồn.</p>
       </div> : null}
     </div>

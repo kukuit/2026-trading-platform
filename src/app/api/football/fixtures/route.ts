@@ -9,10 +9,11 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const filter = (url.searchParams.get("filter") ?? "ALL").toUpperCase();
   const page = Math.max(1, Number(url.searchParams.get("page") ?? 1) || 1);
+  const recordedOnly = url.searchParams.get("recorded") === "true";
   if (!["ALL", "LIVE", "UPCOMING", "FINISHED", "TEST"].includes(filter)) {
     return NextResponse.json({ error: "Invalid fixture filter." }, { status: 400 });
   }
-  const hasAdvancedFilters = ["from", "to", "leagueId", "status", "search"].some((key) => url.searchParams.has(key));
+  const hasAdvancedFilters = recordedOnly || ["from", "to", "leagueId", "status", "search"].some((key) => url.searchParams.has(key));
   if (hasAdvancedFilters) {
     const leagueId = url.searchParams.get("leagueId");
     return withFootballAdmin(request, () => queryFixtures({
@@ -23,6 +24,7 @@ export async function GET(request: Request) {
       leagueId: leagueId && Number.isInteger(Number(leagueId)) ? Number(leagueId) : undefined,
       status: url.searchParams.get("status") ?? undefined,
       search: url.searchParams.get("search") ?? undefined,
+      recordedOnly,
     }));
   }
   return withFootballAdmin(request, () => listFixtures(filter, page));

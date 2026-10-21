@@ -3,6 +3,8 @@ export const FOOTBALL_TAB_SEGMENTS = {
   fixtures: "match",
   radar: "live-radar",
   live: "live-recording",
+  history: "odds-history",
+  analytics: "analytics",
   results: "missing-results",
   system: "system-status",
   test: "api-check",

@@ -7,8 +7,8 @@ function market(name, values) {
   return { id: 999, name, values };
 }
 
-function selection(value, odd, handicap) {
-  return { value, odd, handicap };
+function selection(value, odd, handicap, main) {
+  return { value, odd, handicap, ...(main === undefined ? {} : { main }) };
 }
 
 function normalizedMarkets() {
@@ -53,6 +53,21 @@ test("parses AH line sign and both side prices from the same bookmaker", () => {
   assert.equal(result.ouFtLine, "2.5");
   assert.deepEqual(result.missingMarkets, []);
   assert.equal(result.dataStatus, "COMPLETE");
+});
+
+test("uses the provider main OU pair and keeps both prices on the same line", () => {
+  const values = normalizeLiveOdds({ response: [{
+    bookmakers: [{ id: 7, name: "Primary", bets: [market("Over/Under Line", [
+      selection("Over", "2.125", "3.0", true),
+      selection("Over", "2.25", "3.25"),
+      selection("Under", "1.75", "3.0", true),
+      selection("Under", "1.65", "3.25"),
+    ])] }],
+  }] }).values;
+  const result = parseStructuredLiveMarkets(values, { home: "Home", away: "Away" });
+  assert.equal(result.ouFtLine, "3");
+  assert.equal(result.ouFtOverPrice, "2.125");
+  assert.equal(result.ouFtUnderPrice, "1.75");
 });
 
 test("derives the home AH sign only from an away line when the home line is absent", () => {

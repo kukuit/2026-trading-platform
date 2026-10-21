@@ -5,10 +5,18 @@ import { FOOTBALL_LEAGUES, footballJobName, getFootballLeague, isSupportedFootba
 import { apiFootballClient } from "./api-client";
 import { isLiveFixtureStatus, isTerminalFixtureStatus, getCollectorJobs } from "./service";
 import { providerFixture } from "./normalizer";
-import { snapshotSlotDefinitions } from "./markets";
+import { displayHandicapLines, PREMATCH_SLOT_KEY, snapshotSlotDefinitions } from "./markets";
 import { isProviderRateLimited, resultStatusFromScores, shouldPauseForQuota } from "./collection-rules";
+import { fetchFixtureCornerResults, type FixtureCornerResults } from "./statistics";
+import { settleFixtureOdds } from "./settlement";
 
 const NOT_STARTED = ["NS", "TBD"];
+const VISIBLE_ODDS_HISTORY: Prisma.FootballOddsSnapshotWhereInput = {
+  OR: [
+    { sourceType: "LIVE" },
+    { sourceType: "PREMATCH", slotKey: PREMATCH_SLOT_KEY },
+  ],
+};
 
 function obj(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -75,11 +83,13 @@ async function saveProviderFixture(raw: unknown, options: { isTest?: boolean; le
   const updateData = existing?.resultStatus === "RESULT_MANUAL"
     ? Object.fromEntries(Object.entries(data).filter(([key]) => !preservedResultFields.has(key))) as typeof data
     : data;
-  return prisma.footballFixture.upsert({
+  const savedFixture = await prisma.footballFixture.upsert({
     where: { providerFixtureId: fixture.providerFixtureId },
     create: { ...data, isTestFixture: Boolean(options.isTest) },
     update: updateData,
   });
+  await settleFixtureOdds(savedFixture.id);
+  return savedFixture;
 }
 
 export async function listFootballLeagues() {
@@ -172,6 +182,7 @@ export type FixtureQuery = {
   search?: string;
   page?: number;
   test?: boolean;
+  recordedOnly?: boolean;
 };
 
 export async function queryFixtures(query: FixtureQuery) {
@@ -192,7 +203,7 @@ export async function queryFixtures(query: FixtureQuery) {
   const isTest = query.filter === "TEST" ? true : query.test ?? false;
   const where: Prisma.FootballFixtureWhereInput = {
     kickoffAt: { gte: start, lte: end },
-    isTestFixture: isTest,
+    ...(query.recordedOnly ? { oddsSnapshots: { some: VISIBLE_ODDS_HISTORY } } : { isTestFixture: isTest }),
     ...(query.leagueId ? { providerLeagueId: query.leagueId } : {}),
     ...(query.status ? { status: query.status.toUpperCase() } : filterStatus ? { status: filterStatus } : {}),
     ...(query.search ? { OR: [
@@ -203,24 +214,43 @@ export async function queryFixtures(query: FixtureQuery) {
   const [fixtures, total] = await Promise.all([
     prisma.footballFixture.findMany({
       where,
-      orderBy: [{ kickoffAt: "asc" }, { providerFixtureId: "asc" }],
+      orderBy: query.recordedOnly
+        ? [{ kickoffAt: "desc" }, { providerFixtureId: "desc" }]
+        : [{ kickoffAt: "asc" }, { providerFixtureId: "asc" }],
       skip: (page - 1) * take,
       take,
       include: {
         liveTracking: { select: { id: true, status: true, isEnabled: true } },
-        _count: { select: { oddsSnapshots: true } },
+        _count: { select: { oddsSnapshots: { where: query.recordedOnly ? VISIBLE_ODDS_HISTORY : { isTest } } } },
         oddsSnapshots: {
           where: {
-            isTest,
-            OR: [
-              { ahFtLine: { not: null } },
-              { ahFtHomePrice: { not: null } },
-              { ahFtAwayPrice: { not: null } },
-            ],
+            ...VISIBLE_ODDS_HISTORY,
+            ...(query.recordedOnly ? {} : {
+              isTest,
+              AND: [{
+                OR: [
+                  { ahFtLine: { not: null } },
+                  { ahFtHomePrice: { not: null } },
+                  { ahFtAwayPrice: { not: null } },
+                ],
+              }],
+            }),
           },
           orderBy: { capturedAt: "desc" },
           take: 1,
-          select: { ahFtLine: true, ahFtHomePrice: true, ahFtAwayPrice: true },
+          select: {
+            capturedAt: true,
+            sourceType: true,
+            period: true,
+            fixtureStatus: true,
+            homeScore: true,
+            awayScore: true,
+            ahFtLine: true,
+            ahFtHomePrice: true,
+            ahFtAwayPrice: true,
+            homeCornerKicks: true,
+            awayCornerKicks: true,
+          },
         },
       },
     }),
@@ -231,6 +261,7 @@ export async function queryFixtures(query: FixtureQuery) {
       const { _count, ...fixtureWithSnapshots } = fixture;
       const { oddsSnapshots, ...fixtureData } = fixtureWithSnapshots;
       const latestAhFt = oddsSnapshots[0];
+      const displayedLines = latestAhFt ? displayHandicapLines(latestAhFt) : null;
       return {
         ...fixtureData,
         kickoffAt: fixture.kickoffAt.toISOString(),
@@ -238,9 +269,12 @@ export async function queryFixtures(query: FixtureQuery) {
         resultUpdatedAt: fixture.resultUpdatedAt?.toISOString() ?? null,
         liveTracking: fixture.liveTracking,
         snapshotCount: _count.oddsSnapshots,
-        latestAhFtLine: latestAhFt?.ahFtLine?.toString() ?? null,
+        lastOddsAt: oddsSnapshots[0]?.capturedAt.toISOString() ?? null,
+        latestAhFtLine: displayedLines?.ahFtLine ?? null,
         latestAhFtHomePrice: latestAhFt?.ahFtHomePrice?.toString() ?? null,
         latestAhFtAwayPrice: latestAhFt?.ahFtAwayPrice?.toString() ?? null,
+        latestHomeCornerKicks: latestAhFt?.homeCornerKicks ?? null,
+        latestAwayCornerKicks: latestAhFt?.awayCornerKicks ?? null,
       };
     }),
     page, pageSize: take, total,
@@ -429,6 +463,9 @@ export async function startFixtureTracking(input: { providerFixtureId: number; i
   }
   const existing = await prisma.footballLiveTracking.findUnique({ where: { fixtureId: fixture.id } });
   if (existing && ["RECORDING", "SCHEDULED", "INTERRUPTED"].includes(existing.status)) return existing;
+  const collectorSettings = await prisma.footballCollectorSettings.findUnique({
+    where: { id: "default" }, select: { oddsIntervalMinutes: true },
+  });
 
   const tracking = await prisma.footballLiveTracking.upsert({
     where: { fixtureId: fixture.id },
@@ -437,7 +474,7 @@ export async function startFixtureTracking(input: { providerFixtureId: number; i
       status: isLiveFixtureStatus(fixture.status) ? "RECORDING" : "SCHEDULED",
       scheduledAt: new Date(),
       ...(isLiveFixtureStatus(fixture.status) ? { startedAt: new Date() } : {}),
-      slots: { create: snapshotSlotDefinitions() },
+      slots: { create: snapshotSlotDefinitions(collectorSettings?.oddsIntervalMinutes ?? FOOTBALL_DEFAULTS.oddsIntervalMinutes) },
     },
     update: {
       isEnabled: true,
@@ -476,24 +513,43 @@ export async function cancelFixtureTracking(id: string) {
 export async function listLiveTrackings() {
   const rows = await prisma.footballLiveTracking.findMany({
     where: { status: { in: ["SCHEDULED", "RECORDING", "INTERRUPTED", "PAUSED"] } },
-    orderBy: [{ status: "asc" }, { fixture: { kickoffAt: "asc" } }],
+    orderBy: { fixture: { kickoffAt: "asc" } },
     include: {
       fixture: { include: { league: { select: { key: true, shortName: true } } } },
-      slots: { orderBy: { targetMinute: "desc" }, take: 1 },
+      slots: { where: { NOT: { slotKey: "PREMATCH_5" } }, orderBy: { targetMinute: "desc" }, take: 1 },
+      odds: {
+        orderBy: { capturedAt: "desc" },
+        take: 1,
+        select: { capturedAt: true, homeCornerKicks: true, awayCornerKicks: true },
+      },
       _count: { select: { odds: true, slots: { where: { status: { in: ["MISSED", "MISSING"] } } } } },
     },
   });
-  return rows.map((tracking) => ({
-    ...tracking,
-    fixture: { ...tracking.fixture, kickoffAt: tracking.fixture.kickoffAt.toISOString() },
-    scheduledAt: tracking.scheduledAt.toISOString(),
-    startedAt: tracking.startedAt?.toISOString() ?? null,
-    lastPolledAt: tracking.lastPolledAt?.toISOString() ?? null,
-    completedAt: tracking.completedAt?.toISOString() ?? null,
-    lastSlot: tracking.slots[0] ? { ...tracking.slots[0], capturedAt: tracking.slots[0].capturedAt?.toISOString() ?? null } : null,
-    snapshotCount: tracking._count.odds,
-    missingSnapshotCount: tracking._count.slots,
-  }));
+  rows.sort((left, right) => {
+    const leftIsLive = left.status === "RECORDING" || isLiveFixtureStatus(left.fixture.status);
+    const rightIsLive = right.status === "RECORDING" || isLiveFixtureStatus(right.fixture.status);
+    return Number(rightIsLive) - Number(leftIsLive) ||
+      left.fixture.kickoffAt.getTime() - right.fixture.kickoffAt.getTime() ||
+      left.fixture.providerFixtureId - right.fixture.providerFixtureId;
+  });
+  return rows.map((tracking) => {
+    const { odds, ...trackingData } = tracking;
+    const latestOdds = odds[0];
+    return {
+      ...trackingData,
+      fixture: { ...tracking.fixture, kickoffAt: tracking.fixture.kickoffAt.toISOString() },
+      scheduledAt: tracking.scheduledAt.toISOString(),
+      startedAt: tracking.startedAt?.toISOString() ?? null,
+      lastPolledAt: tracking.lastPolledAt?.toISOString() ?? null,
+      completedAt: tracking.completedAt?.toISOString() ?? null,
+      lastSlot: tracking.slots[0] ? { ...tracking.slots[0], capturedAt: tracking.slots[0].capturedAt?.toISOString() ?? null } : null,
+      latestOddsAt: latestOdds?.capturedAt.toISOString() ?? null,
+      latestHomeCornerKicks: latestOdds?.homeCornerKicks ?? null,
+      latestAwayCornerKicks: latestOdds?.awayCornerKicks ?? null,
+      snapshotCount: tracking._count.odds,
+      missingSnapshotCount: tracking._count.slots,
+    };
+  });
 }
 
 export async function getTrackingOdds(id: string, page = 1) {
@@ -505,17 +561,18 @@ export async function getTrackingOdds(id: string, page = 1) {
   const take = 100;
   const [odds, total, slots] = await Promise.all([
     prisma.footballOddsSnapshot.findMany({
-      where: { trackingId: tracking.id }, orderBy: { capturedAt: "desc" },
-      skip: (Math.max(1, page) - 1) * take, take, include: { values: true },
+      where: { trackingId: tracking.id, ...VISIBLE_ODDS_HISTORY }, orderBy: { capturedAt: "desc" },
+      skip: (Math.max(1, page) - 1) * take, take,
     }),
-    prisma.footballOddsSnapshot.count({ where: { trackingId: tracking.id } }),
+    prisma.footballOddsSnapshot.count({ where: { trackingId: tracking.id, ...VISIBLE_ODDS_HISTORY } }),
     prisma.footballTrackingSlot.findMany({ where: { trackingId: tracking.id }, orderBy: { targetMinute: "asc" } }),
   ]);
   return {
     tracking,
     fixture: tracking.fixture,
-    odds: odds.map((snapshot) => ({ ...snapshot, capturedAt: snapshot.capturedAt.toISOString(), providerUpdatedAt: snapshot.providerUpdatedAt?.toISOString() ?? null })),
-    slots: slots.map((slot) => ({ ...slot, capturedAt: slot.capturedAt?.toISOString() ?? null })),
+    odds: odds.map((snapshot) => ({ ...snapshot, ...displayHandicapLines(snapshot), capturedAt: snapshot.capturedAt.toISOString(), providerUpdatedAt: snapshot.providerUpdatedAt?.toISOString() ?? null })),
+    slots: slots.filter((slot) => slot.period !== "PREMATCH" || slot.slotKey === PREMATCH_SLOT_KEY)
+      .map((slot) => ({ ...slot, capturedAt: slot.capturedAt?.toISOString() ?? null })),
     page, pageSize: take, total,
   };
 }
@@ -533,6 +590,19 @@ export async function syncFixtureResult(providerFixtureId: number) {
   }
   if (!isTerminalFixtureStatus(updatedFixture.status)) throw new Error("Fixture has not finished yet.");
   const resultStatus = resultStatusFromScores(updatedFixture);
+  let cornerResults: FixtureCornerResults | null = null;
+  if ([fixture.homeCornerKicksHt, fixture.awayCornerKicksHt, fixture.homeCornerKicksFt, fixture.awayCornerKicksFt].some((value) => value === null)) {
+    try {
+      cornerResults = await fetchFixtureCornerResults(providerFixtureId, {
+        homeId: updatedFixture.homeTeamId,
+        awayId: updatedFixture.awayTeamId,
+        homeName: updatedFixture.homeTeamName,
+        awayName: updatedFixture.awayTeamName,
+      });
+    } catch {
+      // Corner results are supplementary and must not block score synchronization.
+    }
+  }
   const result = await prisma.footballFixture.update({
     where: { id: fixture.id },
     data: {
@@ -544,12 +614,17 @@ export async function syncFixtureResult(providerFixtureId: number) {
       awayScoreHt: updatedFixture.awayScoreHt,
       homeScoreFt: updatedFixture.homeScoreFt,
       awayScoreFt: updatedFixture.awayScoreFt,
+      homeCornerKicksHt: cornerResults?.homeCornerKicksHt ?? fixture.homeCornerKicksHt,
+      awayCornerKicksHt: cornerResults?.awayCornerKicksHt ?? fixture.awayCornerKicksHt,
+      homeCornerKicksFt: cornerResults?.homeCornerKicksFt ?? fixture.homeCornerKicksFt,
+      awayCornerKicksFt: cornerResults?.awayCornerKicksFt ?? fixture.awayCornerKicksFt,
       resultStatus,
       resultSource: "API",
       resultUpdatedAt: new Date(),
       lastSyncedAt: new Date(),
     },
   });
+  await settleFixtureOdds(fixture.id);
   const tracking = await prisma.footballLiveTracking.findUnique({ where: { fixtureId: fixture.id } });
   if (tracking && tracking.status !== "CANCELLED") {
     await prisma.footballLiveTracking.update({ where: { id: tracking.id }, data: { status: "COMPLETED", isEnabled: false, completedAt: new Date() } });
@@ -573,6 +648,7 @@ export async function updateFixtureResultManually(providerFixtureId: number, inp
       resultStatus: "RESULT_MANUAL", resultSource: "MANUAL", resultUpdatedAt: new Date(),
     },
   });
+  await settleFixtureOdds(fixture.id);
   return { providerFixtureId, resultStatus: result.resultStatus };
 }
 

@@ -4,9 +4,9 @@ import { FOOTBALL_DEFAULTS, footballDateKey, getUtcDate, shiftFootballDate } fro
 import { apiFootballClient } from "./api-client";
 import { getCollectorJobs, isLiveFixtureStatus, syncLeagueFixtures } from "./service";
 import { getQuotaOverview, QuotaExceededError } from "./quota";
-import { providerFixture } from "./normalizer";
+import { normalizeLiveOdds, providerFixture } from "./normalizer";
 import { captureTrackedOdds, transitionTrackingFromFixture } from "./collector";
-import { dueLiveSlot } from "./markets";
+import { dueLiveSlot, PREMATCH_MINUTES, PREMATCH_SLOT_KEY } from "./markets";
 import { FOOTBALL_LEAGUES } from "./leagues";
 import { isProviderRateLimited } from "./collection-rules";
 
@@ -25,6 +25,150 @@ function nextUtcReset(now: Date) {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message.slice(0, 4000) : "Unknown collector error.";
+}
+
+function oddsFixtureId(raw: unknown) {
+  if (!raw || typeof raw !== "object") return null;
+  const fixture = (raw as Record<string, unknown>).fixture;
+  if (!fixture || typeof fixture !== "object") return null;
+  const id = Number((fixture as Record<string, unknown>).id);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+type PrematchTracking = {
+  id: string;
+  status: string;
+  isEnabled: boolean;
+  fixture: {
+    id: string;
+    providerFixtureId: number;
+    kickoffAt: Date;
+    status: string;
+    elapsedMinute: number | null;
+    elapsedExtraTime: number;
+    homeScore: number | null;
+    awayScore: number | null;
+    homeTeamId: number | null;
+    awayTeamId: number | null;
+    homeScoreHt: number | null;
+    awayScoreHt: number | null;
+    homeScoreFt: number | null;
+    awayScoreFt: number | null;
+    homeTeamName: string;
+    awayTeamName: string;
+    isTestFixture: boolean;
+  };
+};
+
+async function capturePrematchOdds(trackings: PrematchTracking[], now = new Date()) {
+  const windowEnd = now.getTime() + PREMATCH_MINUTES * 60_000;
+  for (const tracking of trackings) {
+    const fixture = tracking.fixture;
+    const kickoffAt = fixture.kickoffAt.getTime();
+    const preKickoffWindow = kickoffAt > now.getTime() && kickoffAt <= windowEnd;
+    if (!tracking.isEnabled || !["SCHEDULED", "RECORDING", "INTERRUPTED"].includes(tracking.status) ||
+      ["FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"].includes(fixture.status)) continue;
+
+    if (kickoffAt <= now.getTime()) {
+      await prisma.footballTrackingSlot.updateMany({
+        where: { trackingId: tracking.id, slotKey: PREMATCH_SLOT_KEY, status: "PENDING" },
+        data: { status: "MISSED", error: "PRE-MATCH odds were not captured within the 10-minute pre-kickoff window." },
+      });
+      continue;
+    }
+    if (!preKickoffWindow) continue;
+
+    const slotKey = PREMATCH_SLOT_KEY;
+    await prisma.footballTrackingSlot.upsert({
+      where: { trackingId_slotKey: { trackingId: tracking.id, slotKey } },
+      create: { trackingId: tracking.id, slotKey, targetMinute: -PREMATCH_MINUTES, period: "PREMATCH" },
+      update: {},
+    });
+    const existing = await prisma.footballOddsSnapshot.findFirst({
+      where: { trackingId: tracking.id, slotKey },
+      select: { id: true },
+    });
+    if (existing) continue;
+
+    const endpoint = `/odds?fixture=${fixture.providerFixtureId}`;
+    const lastRequest = await prisma.footballApiRequestLog.findFirst({
+      where: { endpoint }, orderBy: { requestedAt: "desc" }, select: { requestedAt: true },
+    });
+    if (lastRequest && now.getTime() - lastRequest.requestedAt.getTime() < 60_000) continue;
+
+    const quota = await getQuotaOverview(now);
+    if (quota.remaining <= 0 || quota.oddsRemaining <= 0) continue;
+
+    const payload = await apiFootballClient.get(
+      "/odds", { fixture: fixture.providerFixtureId }, { type: "ODDS", fixtureId: fixture.providerFixtureId },
+    ) as { response: unknown[] };
+    if (!normalizeLiveOdds(payload, fixture.providerFixtureId).values.length) {
+      await prisma.footballTrackingSlot.updateMany({
+        where: { trackingId: tracking.id, slotKey, status: "PENDING" },
+        data: { error: "API-Football has not published pre-match odds yet; retrying within the ten-minute window." },
+      });
+      continue;
+    }
+
+    await captureTrackedOdds({
+      trackingId: tracking.id,
+      fixture: {
+        id: fixture.id,
+        providerFixtureId: fixture.providerFixtureId,
+        status: fixture.status,
+        elapsedMinute: fixture.elapsedMinute,
+        elapsedExtraTime: fixture.elapsedExtraTime,
+        homeScore: fixture.homeScore ?? 0,
+        awayScore: fixture.awayScore ?? 0,
+        homeTeamId: fixture.homeTeamId,
+        awayTeamId: fixture.awayTeamId,
+        homeScoreHt: fixture.homeScoreHt,
+        awayScoreHt: fixture.awayScoreHt,
+        homeScoreFt: fixture.homeScoreFt,
+        awayScoreFt: fixture.awayScoreFt,
+        homeTeamName: fixture.homeTeamName,
+        awayTeamName: fixture.awayTeamName,
+      },
+      raw: payload,
+      slotKey,
+      targetMinute: -PREMATCH_MINUTES,
+      actualMinute: -PREMATCH_MINUTES,
+      period: "PREMATCH",
+      sourceType: "PREMATCH",
+      isTest: fixture.isTestFixture,
+    });
+  }
+}
+
+async function getLiveOddsForFixture(
+  fixtureId: number,
+  groupedOdds: Map<number, unknown>,
+  minimumIntervalSeconds: number,
+) {
+  const groupedItem = groupedOdds.get(fixtureId);
+  if (groupedItem && normalizeLiveOdds({ response: [groupedItem] }, fixtureId).values.length > 0) {
+    return groupedItem;
+  }
+
+  const endpoint = `/odds/live?fixture=${fixtureId}`;
+  const lastRequest = await prisma.footballApiRequestLog.findFirst({
+    where: { endpoint }, orderBy: { requestedAt: "desc" }, select: { requestedAt: true },
+  });
+  if (lastRequest && Date.now() - lastRequest.requestedAt.getTime() < minimumIntervalSeconds * 1000) {
+    return null;
+  }
+
+  const quota = await getQuotaOverview();
+  if (quota.remaining <= 0 || quota.oddsRemaining <= 0) return null;
+
+  const payload = await apiFootballClient.get(
+    "/odds/live", { fixture: fixtureId }, { type: "ODDS", fixtureId },
+  ) as { response: unknown[] };
+  return payload.response.find((item) => {
+    const responseFixtureId = oddsFixtureId(item) ?? providerFixture(item)?.providerFixtureId;
+    return responseFixtureId === fixtureId &&
+      normalizeLiveOdds({ response: [item] }, fixtureId).values.length > 0;
+  }) ?? null;
 }
 
 async function recoverPersistedTrackingState() {
@@ -151,10 +295,11 @@ async function processExternalTrackings() {
     where: { id: { in: activeTrackings.map((tracking) => tracking.id) }, isEnabled: true },
     include: { fixture: true },
   });
+  await capturePrematchOdds(updatedRows);
   const liveRows = updatedRows.filter((tracking) => isLiveFixtureStatus(tracking.fixture.status));
   if (!liveRows.length) return;
   const currentQuota = await getQuotaOverview();
-  const configuredOddsSeconds = Math.max(FOOTBALL_DEFAULTS.livePollingIntervalSeconds, (settings?.oddsIntervalMinutes ?? FOOTBALL_DEFAULTS.oddsIntervalMinutes) * 60);
+  const configuredOddsSeconds = Math.max(60, (settings?.oddsIntervalMinutes ?? FOOTBALL_DEFAULTS.oddsIntervalMinutes) * 60);
   const adaptiveOddsSeconds = currentQuota.oddsRemaining <= 10 || currentQuota.remaining <= 15 ? Math.max(configuredOddsSeconds, 900) : configuredOddsSeconds;
   const byLeague = new Map<number, typeof liveRows>();
   for (const tracking of liveRows) {
@@ -172,15 +317,21 @@ async function processExternalTrackings() {
     const payload = await apiFootballClient.get("/odds/live", { league: leagueId }, { type: "ODDS" }) as { response: unknown[] };
     const oddsByFixture = new Map<number, unknown>();
     for (const raw of payload.response) {
-      const parsed = providerFixture(raw);
-      if (parsed) oddsByFixture.set(parsed.providerFixtureId, raw);
+      const fixtureId = oddsFixtureId(raw) ?? providerFixture(raw)?.providerFixtureId;
+      if (fixtureId) oddsByFixture.set(fixtureId, raw);
     }
     for (const tracking of fixtures) {
       const fixture = tracking.fixture;
-      const due = dueLiveSlot(fixture.status, fixture.elapsedMinute, fixture.elapsedExtraTime);
+      const due = dueLiveSlot(
+        fixture.status, fixture.elapsedMinute, fixture.elapsedExtraTime,
+        settings?.oddsIntervalMinutes ?? FOOTBALL_DEFAULTS.oddsIntervalMinutes,
+      );
       if (!due) continue;
-      const exists = await prisma.footballOddsSnapshot.findFirst({ where: { trackingId: tracking.id, slotKey: due.slotKey }, select: { id: true } });
-      if (exists) continue;
+      const exists = await prisma.footballOddsSnapshot.findFirst({
+        where: { trackingId: tracking.id, slotKey: due.slotKey }, select: { id: true, dataStatus: true },
+      });
+      if (exists && exists.dataStatus !== "MISSING") continue;
+      const oddsItem = await getLiveOddsForFixture(fixture.providerFixtureId, oddsByFixture, adaptiveOddsSeconds);
       await captureTrackedOdds({
         trackingId: tracking.id,
         fixture: {
@@ -191,6 +342,8 @@ async function processExternalTrackings() {
           elapsedExtraTime: fixture.elapsedExtraTime,
           homeScore: fixture.homeScore,
           awayScore: fixture.awayScore,
+          homeTeamId: fixture.homeTeamId,
+          awayTeamId: fixture.awayTeamId,
           homeScoreHt: fixture.homeScoreHt,
           awayScoreHt: fixture.awayScoreHt,
           homeScoreFt: fixture.homeScoreFt,
@@ -198,7 +351,7 @@ async function processExternalTrackings() {
           homeTeamName: fixture.homeTeamName,
           awayTeamName: fixture.awayTeamName,
         },
-        raw: { get: "/odds/live", response: oddsByFixture.has(fixture.providerFixtureId) ? [oddsByFixture.get(fixture.providerFixtureId)] : [] },
+        raw: { get: "/odds/live", response: oddsItem ? [oddsItem] : [] },
         isTest: fixture.isTestFixture,
         ...due,
       });
@@ -240,8 +393,11 @@ async function pollFixtureWindow(job: {
   pollingIntervalSeconds: number;
 }) {
   const now = new Date();
-  const from = footballDateKey(now);
-  const to = shiftFootballDate(from, 1);
+  // Keep yesterday in the window so tracked fixtures that cross local midnight
+  // continue receiving status/minute updates until they finish.
+  const today = footballDateKey(now);
+  const from = shiftFootballDate(today, -1);
+  const to = shiftFootballDate(today, 1);
   const existing = await prisma.footballFixture.findMany({
     where: {
       providerLeagueId: job.leagueId,
@@ -317,6 +473,7 @@ async function pollFixtureWindow(job: {
       elapsedExtraTime: number;
     });
   }
+  await capturePrematchOdds(trackedRows, now);
   const oddsCandidateIds = new Set([
     ...trackedRows.filter((tracking) => isLiveFixtureStatus(latestById.get(tracking.fixture.providerFixtureId)?.status ?? tracking.fixture.status))
       .map((tracking) => tracking.fixture.providerFixtureId),
@@ -324,7 +481,7 @@ async function pollFixtureWindow(job: {
 
   if (oddsCandidateIds.size > 0) {
     const quota = await getQuotaOverview(now);
-    const configuredOddsIntervalSeconds = Math.max(job.pollingIntervalSeconds, collectorSettings.oddsIntervalMinutes * 60);
+    const configuredOddsIntervalSeconds = Math.max(60, collectorSettings.oddsIntervalMinutes * 60);
     const adaptiveOddsInterval = quota.oddsRemaining <= 10 || quota.remaining <= 15
       ? Math.max(configuredOddsIntervalSeconds, 900)
       : configuredOddsIntervalSeconds;
@@ -342,71 +499,34 @@ async function pollFixtureWindow(job: {
         { league: job.leagueId },
         { type: "ODDS" },
       ) as { response: unknown[] };
-      const candidateMap = new Map(
-        [...trackedRows.map((tracking) => tracking.fixture), ...latestFixtures.map((fixture) => ({
-          ...fixture,
-          id: existing.find((item) => item.providerFixtureId === fixture.providerFixtureId)?.id ?? "",
-          isTestFixture: false,
-          lastSyncedAt: now,
-          createdAt: now,
-          updatedAt: now,
-        }))].map((fixture) => [fixture.providerFixtureId, fixture]),
-      );
       const oddsByFixture = new Map<number, unknown>();
       for (const item of oddsPayload.response) {
-        const normalizedFixture = providerFixture(item);
-        const fixtureId = normalizedFixture?.providerFixtureId;
+        const fixtureId = oddsFixtureId(item) ?? providerFixture(item)?.providerFixtureId;
         if (!fixtureId || !oddsCandidateIds.has(fixtureId)) continue;
         oddsByFixture.set(fixtureId, item);
-        const match = candidateMap.get(fixtureId);
-        const tracked = trackedRows.find((tracking) => tracking.fixture.providerFixtureId === fixtureId && tracking.isEnabled);
-        if (tracked) {
-          const currentFixture = await prisma.footballFixture.findUnique({ where: { id: tracked.fixtureId } });
-          const state = normalizedFixture ?? match ?? currentFixture;
-          const due = state && dueLiveSlot(state.status, state.elapsedMinute, "elapsedExtraTime" in state ? Number(state.elapsedExtraTime) || 0 : 0);
-          if (state && due) {
-            await captureTrackedOdds({
-              trackingId: tracked.id,
-              fixture: {
-                id: tracked.fixtureId,
-                providerFixtureId: fixtureId,
-                status: state.status,
-                elapsedMinute: state.elapsedMinute,
-                elapsedExtraTime: "elapsedExtraTime" in state ? Number(state.elapsedExtraTime) || 0 : 0,
-                homeScore: state.homeScore,
-                awayScore: state.awayScore,
-                homeScoreHt: "homeScoreHt" in state ? state.homeScoreHt : null,
-                awayScoreHt: "awayScoreHt" in state ? state.awayScoreHt : null,
-                homeScoreFt: "homeScoreFt" in state ? state.homeScoreFt : null,
-                awayScoreFt: "awayScoreFt" in state ? state.awayScoreFt : null,
-                homeTeamName: tracked.fixture.homeTeamName,
-                awayTeamName: tracked.fixture.awayTeamName,
-              },
-              raw: { get: "/odds/live", response: [item] },
-              isTest: tracked.fixture.isTestFixture,
-              ...due,
-            });
-          }
-        }
       }
       for (const tracking of trackedRows) {
         const state = await prisma.footballFixture.findUnique({ where: { id: tracking.fixtureId } });
         if (!state || !isLiveFixtureStatus(state.status)) continue;
-        const due = dueLiveSlot(state.status, state.elapsedMinute, state.elapsedExtraTime);
+        const due = dueLiveSlot(state.status, state.elapsedMinute, state.elapsedExtraTime, collectorSettings.oddsIntervalMinutes);
         if (!due) continue;
-        const existingSlot = await prisma.footballOddsSnapshot.findFirst({ where: { trackingId: tracking.id, slotKey: due.slotKey }, select: { id: true } });
-        if (existingSlot) continue;
+        const existingSlot = await prisma.footballOddsSnapshot.findFirst({
+          where: { trackingId: tracking.id, slotKey: due.slotKey }, select: { id: true, dataStatus: true },
+        });
+        if (existingSlot && existingSlot.dataStatus !== "MISSING") continue;
+        const oddsItem = await getLiveOddsForFixture(state.providerFixtureId, oddsByFixture, adaptiveOddsInterval);
         await captureTrackedOdds({
           trackingId: tracking.id,
           fixture: {
             id: state.id, providerFixtureId: state.providerFixtureId, status: state.status,
             elapsedMinute: state.elapsedMinute, elapsedExtraTime: state.elapsedExtraTime,
             homeScore: state.homeScore, awayScore: state.awayScore,
+            homeTeamId: state.homeTeamId, awayTeamId: state.awayTeamId,
             homeScoreHt: state.homeScoreHt, awayScoreHt: state.awayScoreHt,
             homeScoreFt: state.homeScoreFt, awayScoreFt: state.awayScoreFt,
             homeTeamName: state.homeTeamName, awayTeamName: state.awayTeamName,
           },
-          raw: { get: "/odds/live", response: oddsByFixture.has(state.providerFixtureId) ? [oddsByFixture.get(state.providerFixtureId)] : [] },
+          raw: { get: "/odds/live", response: oddsItem ? [oddsItem] : [] },
           isTest: state.isTestFixture,
           ...due,
         });
@@ -415,11 +535,22 @@ async function pollFixtureWindow(job: {
   }
 
   const hasLive = trackedRows.some((tracking) => isLiveFixtureStatus(latestById.get(tracking.fixture.providerFixtureId)?.status ?? tracking.fixture.status));
+  const needsFrequentStatusSync = trackedRows.some((tracking) => {
+    const currentStatus = latestById.get(tracking.fixture.providerFixtureId)?.status ?? tracking.fixture.status;
+    const kickoffAt = tracking.fixture.kickoffAt.getTime();
+    const kickoffIsNear = kickoffAt >= now.getTime() - 4 * 60 * 60 * 1000 && kickoffAt <= now.getTime() + 15 * 60 * 1000;
+    return isLiveFixtureStatus(currentStatus)
+      || tracking.status === "RECORDING"
+      || tracking.status === "INTERRUPTED"
+      || (tracking.status === "SCHEDULED" && kickoffIsNear);
+  });
   const remainingQuota = await getQuotaOverview(now);
-  const configuredOddsIntervalSeconds = Math.max(job.pollingIntervalSeconds, collectorSettings.oddsIntervalMinutes * 60);
-  const nextDelaySeconds = remainingQuota.oddsRemaining <= 10 || remainingQuota.remaining <= 15
-    ? Math.max(configuredOddsIntervalSeconds, 900)
-    : configuredOddsIntervalSeconds;
+  const configuredOddsIntervalSeconds = Math.max(60, collectorSettings.oddsIntervalMinutes * 60);
+  const nextDelaySeconds = needsFrequentStatusSync
+    ? statusIntervalSeconds
+    : remainingQuota.oddsRemaining <= 10 || remainingQuota.remaining <= 15
+      ? Math.max(configuredOddsIntervalSeconds, 900)
+      : configuredOddsIntervalSeconds;
   const nextRunAt = new Date(Date.now() + nextDelaySeconds * 1000);
   await updateJob(job.id, {
     status: hasLive ? "LIVE" : "WATCHING",

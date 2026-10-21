@@ -1,0 +1,2 @@
+ALTER TABLE `FootballOddsSnapshot`
+  MODIFY `sourceType` ENUM('LIVE', 'PREMATCH') NOT NULL DEFAULT 'LIVE';

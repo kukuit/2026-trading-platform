@@ -3,7 +3,9 @@ import type { PeriodKey } from "./markets";
 const PERIOD_RANK: Record<string, number> = { "1H": 1, "2H": 2, ET: 3 };
 
 export function shouldCaptureSlot(existingSnapshot: unknown) {
-  return existingSnapshot === null || existingSnapshot === undefined;
+  if (existingSnapshot === null || existingSnapshot === undefined) return true;
+  return typeof existingSnapshot === "object" && "dataStatus" in existingSnapshot &&
+    (existingSnapshot as { dataStatus?: unknown }).dataStatus === "MISSING";
 }
 
 export function shouldMarkEarlierSlotMissed(

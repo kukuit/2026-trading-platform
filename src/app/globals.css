@@ -60,10 +60,66 @@ button:disabled {
   border-radius: 999px;
 }
 
+.settlement-badge {
+  display: inline-block;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settlement-win {
+  background-color: #bbf7d0;
+  color: #14532d;
+}
+
+.settlement-half-win {
+  background-color: #f0fdf4;
+  color: #15803d;
+}
+
+.settlement-push {
+  background-color: #f1f5f9;
+  color: #475569;
+}
+
+.settlement-loss {
+  background-color: #fecaca;
+  color: #991b1b;
+}
+
+.settlement-half-loss {
+  background-color: #fff1f2;
+  color: #e11d48;
+}
+
 .football-theme-dark {
   color-scheme: dark;
   background-color: #0b1220;
   color: #e2e8f0;
+}
+
+.football-theme-dark .settlement-win {
+  background-color: rgb(16 185 129 / 26%);
+  color: #a7f3d0;
+}
+
+.football-theme-dark .settlement-half-win {
+  background-color: rgb(16 185 129 / 9%);
+  color: #86efac;
+}
+
+.football-theme-dark .settlement-push {
+  background-color: rgb(148 163 184 / 14%);
+  color: #cbd5e1;
+}
+
+.football-theme-dark .settlement-loss {
+  background-color: rgb(244 63 94 / 26%);
+  color: #fecdd3;
+}
+
+.football-theme-dark .settlement-half-loss {
+  background-color: rgb(244 63 94 / 9%);
+  color: #fda4af;
 }
 
 .football-theme-dark .bg-white,
